@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "glimmer-ppo"
+version = "0.1.0"
+description = "PPO for Muse Glimmer controlling a Panda through the harness on LIBERO-90."
+readme = "README.md"
+requires-python = ">=3.11"
+# The harness (Session, parser, checker, worker support) comes from
+# llm-agent-memory, installed editable next to this repo (see README).
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=10",
+    "scipy>=1.10",
+    "torch>=2.4",
+    "transformers>=5.17",
+    "peft>=0.15",
+    "accelerate>=1.0",
+]
+
+[project.optional-dependencies]
+qlora = ["bitsandbytes>=0.45"]
+demos = ["h5py>=3.10"]
+dev = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/glimmer_ppo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
