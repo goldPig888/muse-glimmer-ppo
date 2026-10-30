@@ -44,7 +44,8 @@ def build_args():
     # where episodes start
     p.add_argument('--task', type=int, default=0, help='paper env: LIBERO-10 task id')
     p.add_argument('--train-inits', default='10-49', help='paper env: initial states to train on (0-9 held out)')
-    p.add_argument('--no-shaping', action='store_true', help='paper env: sparse success + costs only (ablation)')
+    p.add_argument('--reward', choices=['sparse', 'subgoal', 'both'], default='both',
+                   help='paper env reward ablation: success+costs only / + sub-goal potential / + dense distances')
     p.add_argument('--suite', default='libero_90', help='harness env')
     p.add_argument('--tasks', default='0-89', help='harness env')
     p.add_argument('--inits', default='0-49', help='harness env')
@@ -88,7 +89,7 @@ def main():
         if set(train_inits) & set(range(10)):
             print('[ppo] warning: training initial states overlap the 0-9 evaluation states', flush=True)
         ecfg = PaperEnvConfig(max_calls=args.max_decisions, max_steps=args.max_steps,
-                              reward=PotentialConfig(shaping=not args.no_shaping))
+                              reward=PotentialConfig(mode=args.reward))
         sampler = StartSampler('libero_10', [args.task], train_inits, args.demo_states, args.demo_fraction,
                                seed=args.seed, allow_test_suite=True)
     else:

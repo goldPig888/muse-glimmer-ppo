@@ -125,6 +125,7 @@ class PaperEnv:
                     goal_fraction=float(progress.get('fraction', 0.0)),
                     grasped=progress.get('grasped_objects_of_interest', []),
                     lifted=progress.get('lifted_objects_of_interest', []),
+                    reach_m=progress.get('reach_m'), carry_m=progress.get('carry_m'),
                     reward_parts=r.parts)
         with (ep.run_dir / 'ppo_turns.jsonl').open('a') as log:
             log.write(json.dumps(dict(decision=ep.calls, reply=reply, parsed=call, reward=r.total,

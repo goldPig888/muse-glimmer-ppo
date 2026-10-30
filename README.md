@@ -51,14 +51,22 @@ rollout buffer ──> GAE per call ──> clipped PPO epochs ──> LoRA + va
 
 ```text
 r_t  = 1[success] + Phi(s_t+1) - Phi(s_t) - 0.005 - 0.05*1[invalid call] - 0.1*1[repeated invalid call]
-Phi  = 0.2*1[holding soup or sauce] + 0.1*1[lifted >= 3 cm] + 1.0*(goal conditions met / 2)
+
+Phi  = 0.2*1[holding soup or sauce] + 0.1*1[lifted >= 3 cm] + 1.0*(goal conditions met / 2)     sub-goals
+     - 0.1*min(1, reach/0.3 m) - 0.1*min(1, carry/0.3 m)                                        dense
 ```
 
-Task 0 has two goal conditions, `In(alphabet_soup, basket)` and
-`In(tomato_sauce, basket)`, so one can in the basket is worth 0.5. That is
-more than holding and lifting (0.3), so releasing into the basket raises Phi.
-The model's own `done` is never rewarded. `--no-shaping` drops Phi for the
-sparse-success ablation.
+- **reach**: hand to the nearest can not yet in the basket (when not holding one).
+- **carry**: held can to the basket's contain region.
+- Task 0 has two goal conditions, `In(alphabet_soup, basket)` and
+  `In(tomato_sauce, basket)`, so one can in the basket is worth 0.5, more
+  than holding and lifting (0.3): releasing into the basket raises Phi.
+- Only cans that must be moved count as "holding": grabbing the basket earns nothing.
+- Everything is one potential, so over an episode the shaping adds up to
+  Phi(end) - Phi(start): hovering, sweeping back and forth, or grab-and-drop earn nothing.
+- The model's own `done` is never rewarded.
+
+`--reward sparse | subgoal | both` (default `both`) gives the three runs of the ablation.
 
 ## Setup
 
@@ -87,8 +95,8 @@ huggingface-cli download meta-models/Muse-Glimmer-30B
    `python scripts/extract_start_states.py --suite libero_10 --allow-test-suite --tasks 0 --demos <libero_10 folder> --output data/task0_starts.npz`
 6. Train:
    ```bash
-   python scripts/train_ppo.py --output runs/task0 --env paper --task 0 --train-inits 10-49 \
-       --demo-states data/task0_starts.npz --demo-fraction 0.7 --max-decisions 80
+   python scripts/train_ppo.py --output runs/task0_both --env paper --task 0 --train-inits 10-49 \
+       --reward both --demo-states data/task0_starts.npz --demo-fraction 0.7 --max-decisions 80
    ```
 7. Evaluate a checkpoint on states 0-9 with `eval_task.py --adapter ...` and
    compare with step 4 and the paper's zero-shot result.

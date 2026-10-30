@@ -46,36 +46,56 @@ class DecisionReward:
 
 @dataclass
 class PotentialConfig:
-    """Reward for the paper-protocol env: success + potential-based shaping + small costs.
+    """Reward for the paper-protocol env.
 
     r_t = R*1[success] + Phi(s_{t+1}) - Phi(s_t) - c_d - c_inv*1[invalid] - c_rep*1[repeat]
-    Phi(s) = w_hold*1[holding target] + w_lift*1[lifted >= 3 cm] + w_goal*(fraction of goal conditions met)
-    Set ``shaping=False`` for the sparse-success ablation.
+
+    Phi(s) = w_hold*1[holding an object to move] + w_lift*1[it is lifted >= 3 cm]
+           + w_goal*(fraction of goal conditions met)                          (sub-goals)
+           - w_reach*min(1, reach/scale) - w_carry*min(1, carry/scale)          (dense)
+
+    reach = hand to the nearest object still to be moved (when not holding one),
+    carry = held object to its destination. ``mode`` picks the ablation:
+    'sparse' (no Phi), 'subgoal' (first line of Phi), 'both' (all of Phi).
     """
+    mode: str = 'both'
     success: float = 1.0
     w_hold: float = 0.2
     w_lift: float = 0.1
-    # w_goal must exceed (w_hold + w_lift) * number of goal conditions' share, or releasing an object
-    # into place would lower Phi. With 2 conditions (task 0) each is worth w_goal/2 = 0.5 > 0.3.
+    # w_goal per condition must exceed w_hold + w_lift, or releasing an object into
+    # place would lower Phi. Task 0 has 2 conditions: 1.0 / 2 = 0.5 > 0.3.
     w_goal: float = 1.0
+    w_reach: float = 0.1
+    w_carry: float = 0.1
+    dense_scale_m: float = 0.3
     invalid: float = -0.05
     repeat: float = -0.1
     per_decision: float = -0.005
-    shaping: bool = True
+
+    def __post_init__(self):
+        if self.mode not in ('sparse', 'subgoal', 'both'):
+            raise ValueError("mode must be 'sparse', 'subgoal' or 'both'")
 
 
 def potential(cfg: PotentialConfig, progress: dict) -> float:
-    return (cfg.w_hold * bool(progress.get('grasped_objects_of_interest'))
-            + cfg.w_lift * bool(progress.get('lifted_objects_of_interest'))
-            + cfg.w_goal * float(progress.get('fraction', 0.0)))
+    if cfg.mode == 'sparse' or not progress:
+        return 0.0
+    phi = (cfg.w_hold * bool(progress.get('grasped_objects_of_interest'))
+           + cfg.w_lift * bool(progress.get('lifted_objects_of_interest'))
+           + cfg.w_goal * float(progress.get('fraction', 0.0)))
+    if cfg.mode == 'both':
+        for key, w in (('reach_m', cfg.w_reach), ('carry_m', cfg.w_carry)):
+            d = progress.get(key)
+            if d is not None:
+                phi -= w * min(1.0, float(d) / cfg.dense_scale_m)
+    return phi
 
 
 def potential_reward(cfg: PotentialConfig, *, prev_progress: dict, progress: dict, success: bool,
                      invalid: bool, repeated: bool) -> DecisionReward:
-    shaping = potential(cfg, progress) - potential(cfg, prev_progress) if cfg.shaping else 0.0
     parts = {
         'success': cfg.success if success else 0.0,
-        'shaping': shaping,
+        'shaping': potential(cfg, progress) - potential(cfg, prev_progress),
         'invalid': cfg.invalid if invalid else 0.0,
         'repeat': cfg.repeat if repeated else 0.0,
         'per_decision': cfg.per_decision,

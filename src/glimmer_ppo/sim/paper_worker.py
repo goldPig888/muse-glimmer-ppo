@@ -44,13 +44,27 @@ def object_heights(domain, names):
     return heights
 
 
+def _position(domain, name):
+    """World position of an object body, or of a region site (e.g. basket_1_contain_region)."""
+    try:
+        if name in domain.obj_body_id:
+            return np.asarray(domain.sim.data.body_xpos[domain.obj_body_id[name]], dtype=float)
+        site = domain.object_sites_dict[name]
+        return np.asarray(domain.sim.data.get_site_xpos(site.name), dtype=float)
+    except (AttributeError, KeyError, ValueError):
+        return None
+
+
 def progress(env, start_heights):
+    """Reward information. Objects to move = first argument of two-argument goals
+    (In/On); their destination = the second argument (a region or an object)."""
     domain = env.env
     goals = domain.parsed_problem['goal_state']
     satisfied = [bool(domain._eval_predicate(g)) for g in goals]
-    interest = list(getattr(domain, 'obj_of_interest', []) or [])
+    moves = [(str(g[1]), str(g[2]), ok) for g, ok in zip(goals, satisfied) if len(g) == 3]
+    to_move = {a for a, _, _ in moves}
     grasped = []
-    for name in interest:
+    for name in to_move:
         obj = getattr(domain, 'objects_dict', {}).get(name)
         if obj is None:
             continue
@@ -61,12 +75,27 @@ def progress(env, start_heights):
             pass
     heights = object_heights(domain, grasped)
     lifted = [n for n in grasped if n in start_heights and heights.get(n, -1) - start_heights[n] >= LIFT_M]
+    # Dense distances (metres), for unsatisfied move goals only.
+    hand = np.asarray(domain.robots[0].controller.ee_pos, dtype=float)
+    reach, carry = None, None
+    pending = [(a, b) for a, b, ok in moves if not ok]
+    held = [(a, b) for a, b in pending if a in grasped]
+    if held:
+        a, b = held[0]
+        pa, pb = _position(domain, a), _position(domain, b)
+        if pa is not None and pb is not None:
+            carry = float(np.linalg.norm(pa - pb))
+    elif pending:
+        dists = [np.linalg.norm(hand - pa) for a, _ in pending if (pa := _position(domain, a)) is not None]
+        reach = float(min(dists)) if dists else None
     return {
         'goals': [' '.join(map(str, g)) for g in goals],
         'satisfied': satisfied,
         'fraction': float(np.mean(satisfied)) if satisfied else 0.0,
         'grasped_objects_of_interest': grasped,
         'lifted_objects_of_interest': lifted,
+        'reach_m': reach,
+        'carry_m': carry,
     }
 
 
@@ -115,7 +144,8 @@ def main():
                         obs, _, _, _ = env.step(np.array([0., 0., 0., 0., 0., 0., grip]))
                     env.env.robots[0].controller.use_delta = False
                     steps = 0
-                    start_heights = object_heights(env.env, getattr(env.env, 'obj_of_interest', []) or [])
+                    goals = env.env.parsed_problem['goal_state']
+                    start_heights = object_heights(env.env, [str(g[1]) for g in goals if len(g) == 3])
                     video = imageio.get_writer(req['video'], fps=20)
                     result = pack()
                     result['instruction'] = task.language

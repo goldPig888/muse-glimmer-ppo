@@ -3,7 +3,8 @@
     python scripts/check_paper_env.py --task 0 --init 0
 
 Plays four fixed replies in the formats the parser accepts: a move_to up
-5 cm, a move_to below the z bound (invalid), the same invalid call again
+5 cm (away from the cans, so the dense reach term gives a small negative
+shaping), a move_to below the z bound (invalid), the same invalid call again
 (repeat penalty), and a reply with no tool call.
 """
 import argparse
@@ -26,6 +27,7 @@ def main():
         print('system prompt chars:', len(messages[0]['content']))
         print('tools:', [t['function']['name'] for t in env.tools])
         print('goals:', env.progress['goals'], '->', env.progress['satisfied'])
+        print('start reach to nearest can (m):', round(env.progress['reach_m'], 3))
         z = float(env.embodiment.last['eef_state'][2])
         bad = '{"name": "move_to", "arguments": {"targets": {"z": 0.1}, "note": "too low"}}'
         replies = [
@@ -37,7 +39,8 @@ def main():
         for reply in replies:
             reward, done, info = env.step(reply)
             print(json.dumps(dict(reward=round(reward, 4), done=done, status=info['status'], tool=info['tool'],
-                                  steps=info['steps'], parts={k: round(v, 4) for k, v in info['reward_parts'].items()})))
+                                  steps=info['steps'], reach_m=info['reach_m'] and round(info['reach_m'], 3),
+                                  parts={k: round(v, 4) for k, v in info['reward_parts'].items()})))
             print('   tool result:', env.messages[-1 if done else -2]['content'].splitlines()[0][:110])
             if done:
                 break
