@@ -82,11 +82,11 @@ class Policy(nn.Module):
         base = _load_base(cfg)
         for p in base.parameters():
             p.requires_grad_(False)
-        if cfg.load_in_4bit:
-            from peft import prepare_model_for_kbit_training
-            base = prepare_model_for_kbit_training(base, use_gradient_checkpointing=cfg.gradient_checkpointing)
-        elif cfg.gradient_checkpointing:
-            base.gradient_checkpointing_enable()
+        # Not peft.prepare_model_for_kbit_training: it upcasts every bf16 tensor to fp32,
+        # which for Muse means the 202k-row embeddings, output head and vision tower
+        # (about 18 GB more) and would not fit a 48 GB A6000.
+        if cfg.gradient_checkpointing:
+            base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
             base.enable_input_require_grads()
         targets = lora_target_names(base, set(cfg.lora_targets))
         self.model = get_peft_model(base, LoraConfig(r=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
@@ -142,6 +142,36 @@ class Policy(nn.Module):
         record = dict(inputs={k: v.cpu() if torch.is_tensor(v) else v for k, v in inputs.items()},
                       response=response)
         return text, truncated, record
+
+    # -- external rollout engine (llama.cpp) ----------------------------------
+    @property
+    def image_token(self) -> str:
+        """The placeholder the chat template writes for each image."""
+        return getattr(self.processor, 'image_token', None) or '<|image|>'
+
+    def render_prompt(self, messages, tools=None):
+        """The exact prompt text this model would see, plus its images in order.
+
+        Used to drive llama.cpp with the same prompt Hugging Face would build."""
+        kwargs = dict(self.cfg.template_kwargs)
+        if tools:
+            kwargs['tools'] = tools
+        if self.cfg.reasoning_strength:
+            kwargs['reasoning_strength'] = self.cfg.reasoning_strength
+        text = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False, **kwargs)
+        images = [part['image'] for m in messages if isinstance(m.get('content'), list)
+                  for part in m['content'] if part.get('type') == 'image']
+        return text, images
+
+    def record_for(self, messages, tools, response_ids) -> dict:
+        """A PPO record for a reply sampled elsewhere: HF-encoded prompt + the sampled token ids."""
+        inputs = self.encode(messages, tools)
+        return dict(inputs={k: v.cpu() if torch.is_tensor(v) else v for k, v in inputs.items()},
+                    response=torch.as_tensor(response_ids, dtype=torch.long))
+
+    def save_adapter(self, path):
+        """LoRA adapter only (what llama.cpp needs)."""
+        self.model.save_pretrained(path)
 
     # -- scoring -----------------------------------------------------------
     def score(self, record, with_value=True, reference=False):

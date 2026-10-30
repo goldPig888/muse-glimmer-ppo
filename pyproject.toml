@@ -18,6 +18,8 @@ dependencies = [
     "transformers>=5.17",
     "peft>=0.15",
     "accelerate>=1.0",
+    "httpx>=0.27",
+    "huggingface-hub>=0.25",
 ]
 
 [project.optional-dependencies]

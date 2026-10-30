@@ -30,6 +30,7 @@ from glimmer_ppo.paper_env import PaperEnv, PaperEnvConfig
 from glimmer_ppo.policy import Policy, PolicyConfig
 from glimmer_ppo.ppo import PPOConfig, explained_variance, gae, kl_penalty, policy_loss, value_loss
 from glimmer_ppo.reward import PotentialConfig, RewardConfig
+from glimmer_ppo.rollout_server import LlamaServer, ServerConfig, generate_with_server
 from glimmer_ppo.starts import StartSampler, parse_ids
 
 
@@ -71,6 +72,17 @@ def build_args():
         else:
             p.add_argument(flag, type=type(value) if value is not None else float, default=value)
     p.add_argument('--minibatch', type=int, default=16, help='decisions per optimizer step')
+    # rollout engine
+    p.add_argument('--rollout', choices=['hf', 'llamacpp'], default='hf',
+                   help='hf: generate with the training model; llamacpp: generate on a llama-server (other GPU)')
+    p.add_argument('--llama-server', help='path to llama-server')
+    p.add_argument('--gguf', help='Muse GGUF for rollouts (Q8_0 recommended)')
+    p.add_argument('--mmproj', help='Muse vision projector GGUF')
+    p.add_argument('--llama-convert', help="path to llama.cpp's convert_lora_to_gguf.py")
+    p.add_argument('--hf-base-dir', help='local HF snapshot of the base model (default: from the HF cache)')
+    p.add_argument('--server-gpu', default='0', help='physical GPU id for llama-server')
+    p.add_argument('--server-port', type=int, default=8090)
+    p.add_argument('--server-ctx', type=int, default=32768)
     return p.parse_args()
 
 
@@ -109,6 +121,26 @@ def main():
 
     env = PaperEnv(out / 'episodes', ecfg) if args.env == 'paper' else HarnessEnv(out / 'episodes', ecfg)
     tools = lambda: getattr(env, 'tools', None)
+
+    server = None
+    if args.rollout == 'llamacpp':
+        missing = [f for f in ('llama_server', 'gguf', 'mmproj', 'llama_convert') if not getattr(args, f)]
+        if missing:
+            raise SystemExit('--rollout llamacpp needs ' + ', '.join('--' + m.replace('_', '-') for m in missing))
+        base_dir = args.hf_base_dir
+        if base_dir is None:
+            from huggingface_hub import snapshot_download
+            base_dir = snapshot_download(args.model, local_files_only=True)
+        server = LlamaServer(ServerConfig(args.llama_server, args.gguf, args.mmproj, gpu=args.server_gpu,
+                                          port=args.server_port, ctx=args.server_ctx,
+                                          convert_script=args.llama_convert, hf_base_dir=base_dir),
+                             out / 'server').start()
+        print(f'[ppo] rollouts on llama-server (GPU {args.server_gpu}), training on this process\'s GPUs', flush=True)
+
+    def act(messages):
+        if server is not None:
+            return generate_with_server(server, policy, messages, tools())
+        return policy.act(messages, tools())
     messages = env.reset(sampler())
     episode_return, episode_log = 0.0, []
 
@@ -118,7 +150,7 @@ def main():
         # ---- 1. collect -------------------------------------------------
         policy.eval()
         while len(batch) < ppo.decisions_per_update:
-            text, truncated, rec = policy.act(messages, tools())
+            text, truncated, rec = act(messages)
             with torch.no_grad():
                 logp_old, value = policy.score(rec)
                 logp_ref, _ = policy.score(rec, with_value=False, reference=True)
@@ -190,7 +222,16 @@ def main():
         print(json.dumps(row), flush=True)
         if update % args.save_every == 0 or update == args.updates:
             policy.save(out / 'checkpoints' / f'update_{update:04d}')
+        if server is not None:
+            # Rollouts must come from the updated policy: push the new LoRA to llama.cpp.
+            t1 = time.time()
+            adapter_dir = out / 'server' / 'adapter_latest'
+            policy.save_adapter(adapter_dir)
+            server.load_adapter(adapter_dir)
+            print(f'[ppo] llama-server reloaded with update {update} adapter in {time.time() - t1:.0f}s', flush=True)
     env.close()
+    if server is not None:
+        server.stop()
 
 
 if __name__ == '__main__':

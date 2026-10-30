@@ -80,6 +80,55 @@ pip install -e ".[dev,demos]"                  # add ,qlora for 4-bit
 huggingface-cli download meta-models/Muse-Glimmer-30B
 ```
 
+## Running on 2x RTX A6000 (2 x 48 GB)
+
+Stop the llama.cpp server you use for the zero-shot runs first (it holds GPU memory).
+
+**Option A, simplest (start here).** Hugging Face does everything, the model
+is spread over both GPUs in 4-bit. Slower generation, exactly on-policy.
+
+```bash
+python scripts/train_ppo.py --output /metadisk/may/ppo/task0_both --env paper --task 0 \
+    --train-inits 10-49 --reward both --load-in-4bit
+```
+
+**Option B, faster rollouts.** llama.cpp generates on GPU 0, Hugging Face
+trains on GPU 1. After every update the LoRA is converted to GGUF and the
+server restarts with it, so rollouts always come from the latest policy.
+
+| GPU | Runs | Approx. memory |
+|---|---|---|
+| 0 | llama-server: Muse Q8_0 GGUF (29.6 GB) + mmproj + KV cache | ~35 GB of 48 |
+| 1 | QLoRA PPO: NF4 weights (~18 GB) + LoRA/optimizer + activations | ~35-45 GB of 48 |
+
+```bash
+# once: Q8_0 GGUF for rollouts (closer to the training weights than Q4)
+huggingface-cli download unsloth/Muse-Glimmer-30B-GGUF --include "*Q8_0*" --local-dir /metadisk/may/models
+
+# check the two engines agree before training (see the script's docstring)
+CUDA_VISIBLE_DEVICES=1 python scripts/check_rollout_server.py --load-in-4bit --server-gpu 0 \
+    --llama-server ~/llama.cpp/build/bin/llama-server \
+    --gguf /metadisk/may/models/<Q8_0 file>.gguf --mmproj <your mmproj .gguf>
+
+# train
+CUDA_VISIBLE_DEVICES=1 python scripts/train_ppo.py --output /metadisk/may/ppo/task0_both \
+    --env paper --task 0 --train-inits 10-49 --reward both --load-in-4bit \
+    --rollout llamacpp --server-gpu 0 \
+    --llama-server ~/llama.cpp/build/bin/llama-server \
+    --gguf /metadisk/may/models/<Q8_0 file>.gguf --mmproj <your mmproj .gguf> \
+    --llama-convert ~/llama.cpp/convert_lora_to_gguf.py
+```
+
+`CUDA_VISIBLE_DEVICES=1` keeps training on GPU 1; the server is started on
+`--server-gpu 0` by the script. Use an f16/bf16 mmproj if one is available
+(your current one is Q4/Q6). Needs a recent llama.cpp (multimodal `/completion`
+with `return_tokens`). Out of memory on GPU 1: lower `--max-new-tokens`
+(e.g. 1024) or `--reasoning medium`, since sequence length drives memory.
+
+Approximate in option B: rollouts come from the Q8_0 GGUF while training uses
+NF4 4-bit, so samples are very slightly off-policy; PPO's ratio is still
+computed consistently by the training model on the exact sampled tokens.
+
 ## Order of work for task 0
 
 1. `python -m pytest` (no GPU, no simulator).
