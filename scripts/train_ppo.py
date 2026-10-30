@@ -1,6 +1,14 @@
-"""PPO for Muse Glimmer in the harness on LIBERO-90.
+"""PPO for Muse Glimmer.
 
-    python scripts/train_ppo.py --output runs/stage2 --max-decisions 3 \
+Paper protocol, LIBERO-10 task 0 (the first task of the paper), training on
+initial states 10-49 and keeping 0-9 for evaluation (scripts/eval_task.py):
+
+    python scripts/train_ppo.py --output runs/task0 --env paper --task 0 \
+        --train-inits 10-49 --max-decisions 80
+
+Harness actions on LIBERO-90 (later):
+
+    python scripts/train_ppo.py --output runs/stage2 --env harness --max-decisions 3 \
         --demo-states data/libero90_starts.npz --demo-fraction 1.0
 
 One update = collect ``--decisions-per-update`` decisions, compute GAE per
@@ -18,9 +26,10 @@ from pathlib import Path
 import torch
 
 from glimmer_ppo.env import EnvConfig, HarnessEnv
+from glimmer_ppo.paper_env import PaperEnv, PaperEnvConfig
 from glimmer_ppo.policy import Policy, PolicyConfig
 from glimmer_ppo.ppo import PPOConfig, explained_variance, gae, kl_penalty, policy_loss, value_loss
-from glimmer_ppo.reward import RewardConfig
+from glimmer_ppo.reward import PotentialConfig, RewardConfig
 from glimmer_ppo.starts import StartSampler, parse_ids
 
 
@@ -30,10 +39,15 @@ def build_args():
     p.add_argument('--updates', type=int, default=100)
     p.add_argument('--save-every', type=int, default=10)
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--env', choices=['paper', 'harness'], default='paper',
+                   help='paper: move_to/done/give_up as in the paper; harness: skill programs')
     # where episodes start
-    p.add_argument('--suite', default='libero_90')
-    p.add_argument('--tasks', default='0-89')
-    p.add_argument('--inits', default='0-49')
+    p.add_argument('--task', type=int, default=0, help='paper env: LIBERO-10 task id')
+    p.add_argument('--train-inits', default='10-49', help='paper env: initial states to train on (0-9 held out)')
+    p.add_argument('--no-shaping', action='store_true', help='paper env: sparse success + costs only (ablation)')
+    p.add_argument('--suite', default='libero_90', help='harness env')
+    p.add_argument('--tasks', default='0-89', help='harness env')
+    p.add_argument('--inits', default='0-49', help='harness env')
     p.add_argument('--demo-states', type=Path)
     p.add_argument('--demo-fraction', type=float, default=0.0)
     # episode limits
@@ -69,10 +83,19 @@ def main():
     pcfg = PolicyConfig(model=args.model, load_in_4bit=args.load_in_4bit, lora_rank=args.lora_rank,
                         lora_alpha=args.lora_alpha, max_new_tokens=args.max_new_tokens,
                         temperature=args.temperature, reasoning_strength=args.reasoning or None)
-    ecfg = EnvConfig(max_decisions=args.max_decisions, max_steps=args.max_steps,
-                     record_video=args.record_video, reward=RewardConfig())
-    sampler = StartSampler(args.suite, parse_ids(args.tasks, 90 if args.suite == 'libero_90' else 10),
-                           parse_ids(args.inits, 50), args.demo_states, args.demo_fraction, seed=args.seed)
+    if args.env == 'paper':
+        train_inits = parse_ids(args.train_inits, 50)
+        if set(train_inits) & set(range(10)):
+            print('[ppo] warning: training initial states overlap the 0-9 evaluation states', flush=True)
+        ecfg = PaperEnvConfig(max_calls=args.max_decisions, max_steps=args.max_steps,
+                              reward=PotentialConfig(shaping=not args.no_shaping))
+        sampler = StartSampler('libero_10', [args.task], train_inits, args.demo_states, args.demo_fraction,
+                               seed=args.seed, allow_test_suite=True)
+    else:
+        ecfg = EnvConfig(max_decisions=args.max_decisions, max_steps=args.max_steps,
+                         record_video=args.record_video, reward=RewardConfig())
+        sampler = StartSampler(args.suite, parse_ids(args.tasks, 90 if args.suite == 'libero_90' else 10),
+                               parse_ids(args.inits, 50), args.demo_states, args.demo_fraction, seed=args.seed)
     (out / 'config.json').write_text(json.dumps(dict(args={k: str(v) for k, v in vars(args).items()},
                                                      ppo=asdict(ppo), policy=asdict(pcfg), env=asdict(ecfg)), indent=2))
 
@@ -83,7 +106,8 @@ def main():
     print(f'[ppo] LoRA on {policy.n_lora_targets} linear layers, '
           f'{sum(p.numel() for p in lora) / 1e6:.1f}M trainable + value head', flush=True)
 
-    env = HarnessEnv(out / 'episodes', ecfg)
+    env = PaperEnv(out / 'episodes', ecfg) if args.env == 'paper' else HarnessEnv(out / 'episodes', ecfg)
+    tools = lambda: getattr(env, 'tools', None)
     messages = env.reset(sampler())
     episode_return, episode_log = 0.0, []
 
@@ -93,7 +117,7 @@ def main():
         # ---- 1. collect -------------------------------------------------
         policy.eval()
         while len(batch) < ppo.decisions_per_update:
-            text, truncated, rec = policy.act(messages)
+            text, truncated, rec = policy.act(messages, tools())
             with torch.no_grad():
                 logp_old, value = policy.score(rec)
                 logp_ref, _ = policy.score(rec, with_value=False, reference=True)
@@ -110,7 +134,7 @@ def main():
                 messages = env.reset(sampler())
             else:
                 messages = env.messages
-        last_value = 0.0 if batch[-1]['done'] else policy.value_of(messages)
+        last_value = 0.0 if batch[-1]['done'] else policy.value_of(messages, tools())
 
         # ---- 2. advantages ---------------------------------------------
         rewards = [r['reward'] - ppo.kl_coef * r['kl'] for r in batch]
@@ -152,7 +176,8 @@ def main():
                    explained_variance=explained_variance(values, ret),
                    response_tokens=mean([len(r['response']) for r in batch]),
                    truncated=sum(r['info']['status'] == 'truncated' for r in batch),
-                   rejected=sum(r['info']['reward_parts']['rejected'] != 0 for r in batch),
+                   invalid=sum(r['info']['status'] in ('invalid', 'plan_error', 'COLLISION', 'IK_FAILURE')
+                               or r['info']['reward_parts'].get('rejected', 0) != 0 for r in batch),
                    episodes=len(done_eps), success_rate=mean([e['success'] for e in done_eps]),
                    mean_goal_fraction=mean([e['goal_fraction'] for e in done_eps]),
                    **{k: mean(v) for k, v in stats.items()})

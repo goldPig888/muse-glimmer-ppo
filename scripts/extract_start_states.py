@@ -32,12 +32,16 @@ def main():
     p.add_argument('--suite', default='libero_90')
     p.add_argument('--lead', type=int, default=15, help='steps before the event (20 Hz)')
     p.add_argument('--max-demos', type=int, default=50)
+    p.add_argument('--tasks', default=None, help='only these task ids, e.g. 0')
+    p.add_argument('--allow-test-suite', action='store_true',
+                   help='allow libero_10 (single-task runs that hold out initial states 0-9 instead)')
     args = p.parse_args()
     from libero.libero import benchmark
     suite = benchmark.get_benchmark_dict()[args.suite]()
-    if args.suite == 'libero_10':
-        raise SystemExit('libero_10 is the held-out test suite')
-    by_name = {suite.get_task(i).name: i for i in range(suite.n_tasks)}
+    if args.suite == 'libero_10' and not args.allow_test_suite:
+        raise SystemExit('libero_10 is the held-out test suite (pass --allow-test-suite for a single-task run)')
+    keep = None if args.tasks is None else {int(t) for t in args.tasks.split(',')}
+    by_name = {suite.get_task(i).name: i for i in range(suite.n_tasks) if keep is None or i in keep}
     rows = dict(task_id=[], demo=[], kind=[], step=[], state=[])
     for path in sorted(args.demos.glob('*_demo.hdf5')):
         name = path.name.removesuffix('_demo.hdf5')

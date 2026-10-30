@@ -38,9 +38,13 @@ def parse_ids(text: str, upper: int) -> list[int]:
 
 class StartSampler:
     def __init__(self, suite='libero_90', tasks=range(90), inits=range(50), demo_states: str | Path | None = None,
-                 demo_fraction: float = 0.0, kinds=('pre_grasp', 'pre_release'), seed: int = 0):
-        if suite in HELD_OUT_SUITES:
-            raise ValueError(f'{suite} is the held-out test suite; do not train on it')
+                 demo_fraction: float = 0.0, kinds=('pre_grasp', 'pre_release'), seed: int = 0,
+                 allow_test_suite: bool = False):
+        # The single-task experiment trains on LIBERO-10 task 0 itself, holding out
+        # initial states instead of tasks; it must say so explicitly.
+        if suite in HELD_OUT_SUITES and not allow_test_suite:
+            raise ValueError(f'{suite} is the held-out test suite; pass allow_test_suite=True for a '
+                             'single-task run that holds out initial states instead')
         self.suite, self.tasks, self.inits = suite, list(tasks), list(inits)
         self.rng = random.Random(seed)
         self.demo: list[Start] = []

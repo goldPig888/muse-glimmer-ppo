@@ -1,0 +1,162 @@
+"""The paper's LIBERO worker, plus reward information.
+
+This is ``inspect_robots_libero/_worker.py`` from LLM_LIBERO (commit 7db834a)
+with three additions and nothing else changed: same 256x256 cameras, same
+agentview flip, same rot6d handling, same 10 settling steps.
+
+* every reply carries ``progress`` (BDDL goal predicates, grasp of an object
+  of interest, lift height). Privileged: used for the reward only, the
+  observation the model sees is unchanged.
+* ``reset`` may take ``sim_state`` (a flattened MuJoCo state from a demo) and
+  ``settle_gripper`` (+1 keeps the hand closed while settling).
+* ``get_state`` returns the current flattened MuJoCo state.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+
+wire = sys.stdout
+sys.stdout = sys.stderr
+_config = os.path.join(os.environ.get('LIBERO_CONFIG_PATH', os.path.expanduser('~/.libero')), 'config.yaml')
+if not os.path.exists(_config):
+    wire.write(json.dumps({'error': f'LIBERO is not initialised ({_config} missing). '
+                           'Run python -c "import libero.libero" once and answer N.'}) + '\n')
+    wire.flush()
+    sys.exit(1)
+from libero.libero import benchmark, get_libero_path  # noqa: E402
+from libero.libero.envs import OffScreenRenderEnv  # noqa: E402
+import robosuite.utils.transform_utils as T  # noqa: E402
+import imageio.v2 as imageio  # noqa: E402
+
+LIFT_M = 0.03
+
+
+def object_heights(domain, names):
+    heights = {}
+    for name in names:
+        try:
+            heights[name] = float(domain.sim.data.body_xpos[domain.obj_body_id[name]][2])
+        except (AttributeError, KeyError, IndexError):
+            pass
+    return heights
+
+
+def progress(env, start_heights):
+    domain = env.env
+    goals = domain.parsed_problem['goal_state']
+    satisfied = [bool(domain._eval_predicate(g)) for g in goals]
+    interest = list(getattr(domain, 'obj_of_interest', []) or [])
+    grasped = []
+    for name in interest:
+        obj = getattr(domain, 'objects_dict', {}).get(name)
+        if obj is None:
+            continue
+        try:
+            if domain._check_grasp(gripper=domain.robots[0].gripper, object_geoms=obj):
+                grasped.append(name)
+        except Exception:
+            pass
+    heights = object_heights(domain, grasped)
+    lifted = [n for n in grasped if n in start_heights and heights.get(n, -1) - start_heights[n] >= LIFT_M]
+    return {
+        'goals': [' '.join(map(str, g)) for g in goals],
+        'satisfied': satisfied,
+        'fraction': float(np.mean(satisfied)) if satisfied else 0.0,
+        'grasped_objects_of_interest': grasped,
+        'lifted_objects_of_interest': lifted,
+    }
+
+
+def main():
+    env = None
+    video = None
+    obs = None
+    steps = 0
+    start_heights = {}
+
+    def pack():
+        robot = env.env.robots[0]
+        return {
+            'images': {k: (obs[k][::-1, ::-1] if k == 'agentview_image' else obs[k]).copy().tolist() for k in
+                       ('agentview_image', 'robot0_eye_in_hand_image')},
+            'eef_state': np.concatenate((robot.controller.ee_pos,
+                robot.controller.ee_ori_mat[:, :2].T.reshape(-1),
+                [np.clip((robot.gripper.current_action[-1] + 1.0) / 2.0, 0, 1)])).tolist(),
+            'gripper_qpos': obs['robot0_gripper_qpos'].tolist(),
+            'success': bool(env.check_success()), 'steps': steps,
+            'progress': progress(env, start_heights),
+        }
+
+    try:
+        for line in sys.stdin:
+            req = json.loads(line)
+            try:
+                if req['op'] == 'reset':
+                    if env is not None:
+                        env.close()
+                    if video is not None:
+                        video.close()
+                    suite = benchmark.get_benchmark_dict()[req.get('suite', 'libero_10')]()
+                    task_id = int(req['task_id'])
+                    task = suite.get_task(task_id)
+                    env = OffScreenRenderEnv(bddl_file_name=str(Path(get_libero_path('bddl_files')) /
+                        task.problem_folder / task.bddl_file), camera_heights=256, camera_widths=256)
+                    env.seed(int(req['env_seed']))
+                    env.reset()
+                    if req.get('sim_state') is not None:
+                        obs = env.set_init_state(np.asarray(req['sim_state'], dtype=float))
+                    else:
+                        obs = env.set_init_state(suite.get_task_init_states(task_id)[int(req['init_state'])])
+                    grip = float(req.get('settle_gripper', -1.0))
+                    for _ in range(10):
+                        obs, _, _, _ = env.step(np.array([0., 0., 0., 0., 0., 0., grip]))
+                    env.env.robots[0].controller.use_delta = False
+                    steps = 0
+                    start_heights = object_heights(env.env, getattr(env.env, 'obj_of_interest', []) or [])
+                    video = imageio.get_writer(req['video'], fps=20)
+                    result = pack()
+                    result['instruction'] = task.language
+                elif req['op'] == 'step':
+                    action = np.asarray(req['action'], dtype=float)
+                    if action.shape != (10,) or not np.all(np.isfinite(action)):
+                        raise ValueError('Invalid action')
+                    a, b = action[3:6], action[6:9]
+                    if np.linalg.norm(a) < 1e-6:
+                        raise ValueError('Degenerate rot6d first column')
+                    a = a / np.linalg.norm(a)
+                    b = b - np.dot(a, b) * a
+                    if np.linalg.norm(b) < 1e-6:
+                        raise ValueError('Degenerate rot6d second column')
+                    b = b / np.linalg.norm(b)
+                    rotation = np.stack([a, b, np.cross(a, b)], axis=1)
+                    action = np.concatenate([action[:3], T.quat2axisangle(T.mat2quat(rotation)), [2 * action[-1] - 1]])
+                    obs, _, _, _ = env.step(action)
+                    steps += 1
+                    result = pack()
+                elif req['op'] == 'get_state':
+                    wire.write(json.dumps({'sim_state': env.get_sim_state().tolist()}) + '\n')
+                    wire.flush()
+                    continue
+                elif req['op'] == 'close':
+                    break
+                else:
+                    raise ValueError('Unknown operation')
+                video.append_data(np.concatenate([np.asarray(result['images'][k], dtype=np.uint8)
+                    for k in ('agentview_image', 'robot0_eye_in_hand_image')], axis=1))
+                wire.write(json.dumps(result) + '\n')
+                wire.flush()
+            except Exception as exc:
+                wire.write(json.dumps({'error': type(exc).__name__ + ': ' + str(exc)}) + '\n')
+                wire.flush()
+    finally:
+        if video is not None:
+            video.close()
+        if env is not None:
+            env.close()
+
+
+if __name__ == '__main__':
+    main()

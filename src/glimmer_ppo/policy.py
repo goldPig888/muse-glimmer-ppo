@@ -111,8 +111,10 @@ class Policy(nn.Module):
         return [p for p in self.model.parameters() if p.requires_grad] + list(self.value_head.parameters())
 
     # -- inputs ------------------------------------------------------------
-    def encode(self, messages) -> dict:
+    def encode(self, messages, tools=None) -> dict:
         kwargs = dict(self.cfg.template_kwargs)
+        if tools:
+            kwargs['tools'] = tools
         if self.cfg.reasoning_strength:
             kwargs['reasoning_strength'] = self.cfg.reasoning_strength
         return self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True,
@@ -123,10 +125,10 @@ class Policy(nn.Module):
 
     # -- acting ------------------------------------------------------------
     @torch.no_grad()
-    def act(self, messages):
+    def act(self, messages, tools=None):
         """Sample one reply. Returns (text, truncated, record) where record holds
         everything PPO needs to rescore this decision later (on CPU)."""
-        inputs = self.encode(messages)
+        inputs = self.encode(messages, tools)
         dev_inputs = {k: v.to(self._device()) if torch.is_tensor(v) else v for k, v in inputs.items()}
         out = self.model.generate(**dev_inputs, max_new_tokens=self.cfg.max_new_tokens, do_sample=True,
                                   temperature=self.cfg.temperature, top_p=1.0, top_k=0)
@@ -135,7 +137,8 @@ class Policy(nn.Module):
         eos = self.processor.tokenizer.eos_token_id
         eos_ids = set(eos if isinstance(eos, (list, tuple)) else [eos])
         truncated = len(response) >= self.cfg.max_new_tokens and int(response[-1]) not in eos_ids
-        text = self.processor.tokenizer.decode(response, skip_special_tokens=True)
+        # Keep special tokens: tool-call markers are often special tokens.
+        text = self.processor.tokenizer.decode(response, skip_special_tokens=False)
         record = dict(inputs={k: v.cpu() if torch.is_tensor(v) else v for k, v in inputs.items()},
                       response=response)
         return text, truncated, record
@@ -150,9 +153,12 @@ class Policy(nn.Module):
         mask = torch.ones_like(ids)
         rest = {k: v for k, v in inputs.items() if k not in ('input_ids', 'attention_mask')}
         ctx = self.model.disable_adapter() if reference else nullcontext()
+        n = response.shape[0]
         with ctx:
-            out = self.model(input_ids=ids, attention_mask=mask, output_hidden_states=with_value, **rest)
-        logits = out.logits[0, prompt_len - 1:-1].float() / self.cfg.temperature
+            # logits_to_keep: only the positions that predict the response (vocab is 202k).
+            out = self.model(input_ids=ids, attention_mask=mask, output_hidden_states=with_value,
+                             logits_to_keep=n + 1, **rest)
+        logits = out.logits[0, :-1].float() / self.cfg.temperature
         logp = torch.log_softmax(logits, dim=-1).gather(-1, response[:, None]).squeeze(-1)
         value = None
         if with_value:
@@ -161,10 +167,10 @@ class Policy(nn.Module):
         return logp, value
 
     @torch.no_grad()
-    def value_of(self, messages) -> float:
+    def value_of(self, messages, tools=None) -> float:
         """V(s) for a state with no response yet (used to bootstrap a batch cut mid-episode)."""
-        inputs = {k: v.to(self._device()) if torch.is_tensor(v) else v for k, v in self.encode(messages).items()}
-        out = self.model(**inputs, output_hidden_states=True)
+        inputs = {k: v.to(self._device()) if torch.is_tensor(v) else v for k, v in self.encode(messages, tools).items()}
+        out = self.model(**inputs, output_hidden_states=True, logits_to_keep=1)
         h = out.hidden_states[-1][0, -1].float().to(self.value_head.weight.device)
         return float(self.value_head(h))
 
