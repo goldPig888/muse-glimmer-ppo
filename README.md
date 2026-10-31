@@ -215,6 +215,17 @@ report and camera frames. Do not start Muse if no states pass; inspect the
 report and try another offset or demonstration. Simulator-state files must
 match the LIBERO scene/version on the machine running them.
 
+For an even easier first stage, extract with `--lead 1` and validate with
+`--test-release` as well as `--require-grasp`. This accepts only unfinished
+states from which a scripted `move_to` with just `gripper=0` completes the
+task without translating the arm. The script saves the original pre-release
+states, not the successful states produced by the check. If every candidate
+is already successful or fails the release check, try offsets 3 or 5 and
+inspect the report. A short offset does not guarantee a usable start.
+After the policy reliably releases across the validated starts, move back
+in small stages (for example leads 1, 3, 5, 10, 15) with reset validation at
+each stage. Scripted release success is a physics check, not policy success.
+
 For a short first curriculum trial on the Ada machine (inside tmux):
 
 ```bash
@@ -351,7 +362,7 @@ same port and refresh the browser; training and Cloudflare can keep running.
 
 ## Status
 
-58 tests pass, including demo-start selection, checkpoint restore, offline training-loop progress and scoring-gradient
+59 tests pass, including demo-start selection, checkpoint restore, offline training-loop progress and scoring-gradient
 checks. Muse loads in 4-bit on 2x A5000 24 GB cards; its native XML tool calls
 parse and execute in LIBERO. A two-decision PPO update saved a checkpoint.
 With bf16 autocast and CPU activation offloading, a recorded 14,402-token

@@ -20,6 +20,15 @@ def rejection_reason(progress, success, min_fraction, require_grasp):
     return None
 
 
+def release_in_place(env):
+    """Physics baseline only; selected training states remain the original pre-release states."""
+    reply = json.dumps(dict(name='move_to', arguments=dict(
+        targets={'gripper': 0.0}, note='Validation: open the gripper in place to release the held object.')))
+    reward, _, info = env.step(reply)
+    return dict(release_success=bool(info['success']), release_reward=reward,
+                release_status=info['status'], release_goal_fraction=info['goal_fraction'])
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--demo-states', type=Path, required=True)
@@ -29,6 +38,8 @@ def main():
     p.add_argument('--max-starts', type=int, default=5)
     p.add_argument('--min-goal-fraction', type=float, default=.5)
     p.add_argument('--require-grasp', action='store_true')
+    p.add_argument('--test-release', action='store_true',
+                   help='also require opening the gripper in place to complete the task, without arm motion')
     args = p.parse_args()
     if args.max_starts < 1 or not 0 <= args.min_goal_fraction < 1:
         p.error('require --max-starts >= 1 and 0 <= --min-goal-fraction < 1')
@@ -52,6 +63,10 @@ def main():
                 row = dict(index=index, label=start.label, accepted=reason is None, reason=reason,
                            fraction=progress.get('fraction'),
                            held=progress.get('grasped_objects_of_interest', []))
+                if row['accepted'] and args.test_release:
+                    row.update(release_in_place(env))
+                    if not row['release_success']:
+                        row.update(accepted=False, reason='opening the gripper in place did not complete the task')
             except Exception as exc:
                 row = dict(index=index, label=start.label, accepted=False,
                            reason=f'{type(exc).__name__}: {exc}')

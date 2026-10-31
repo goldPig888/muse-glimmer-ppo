@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from glimmer_ppo.starts import StartSampler
+from glimmer_ppo.toolcall import parse_tool_call
 
 scripts = Path(__file__).parents[1] / 'scripts'
 extract = runpy.run_path(str(scripts / 'extract_start_states.py'))
@@ -50,3 +51,15 @@ def test_validation_rejects_solved_or_unusable_easy_starts():
     assert 'already successful' in reject(dict(good, fraction=1), True, .5, True)
     assert 'not enough goal' in reject(dict(good, fraction=0), False, .5, True)
     assert 'not held' in reject(dict(good, grasped_objects_of_interest=[]), False, .5, True)
+
+
+def test_scripted_release_baseline_does_not_move_the_arm():
+    class Env:
+        def step(self, text):
+            name, args = parse_tool_call(text)
+            assert name == 'move_to'
+            assert args['targets'] == {'gripper': 0.0}
+            return 1.2, True, dict(success=True, status='success', goal_fraction=1.)
+    result = check['release_in_place'](Env())
+    assert result['release_success']
+    assert result['release_goal_fraction'] == 1.
