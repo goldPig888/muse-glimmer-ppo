@@ -107,3 +107,23 @@ def test_generation_progress_preserves_sampled_tokens(progress):
     assert text == 'reply'
     assert not truncated
     assert record['response'].tolist() == [4, 11]
+
+
+def test_adapter_resume_restores_trainable_parameters_in_place(tmp_path):
+    from peft import LoraConfig, get_peft_model
+    policy = Policy.__new__(Policy)
+    nn.Module.__init__(policy)
+    policy.model = get_peft_model(TinyModel(), LoraConfig(r=2, target_modules=['decoder']))
+    policy.value_head = nn.Linear(4, 1)
+    params = policy.trainable_parameters()
+    for p in params:
+        p.data.fill_(.25)
+    expected = [p.detach().clone() for p in params]
+    policy.save(tmp_path)
+    for p in params:
+        p.data.zero_()
+    policy.load(tmp_path)
+    assert [id(p) for p in policy.trainable_parameters()] == [id(p) for p in params]
+    assert all(p.requires_grad for p in params)
+    for p, original in zip(params, expected):
+        torch.testing.assert_close(p, original)

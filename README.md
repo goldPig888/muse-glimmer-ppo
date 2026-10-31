@@ -138,7 +138,7 @@ PYTORCH_ALLOC_CONF=expandable_segments:True python -u scripts/train_ppo.py \
 Stop if CUDA is unavailable; fix the PyTorch/driver pairing before training.
 The sibling `llm-agent-memory` checkout and its simulator assets are required
 on the other PC too; this repository does not contain them or model weights.
-Choose a fresh output folder for each run; this script does not resume optimizer state.
+Choose a fresh output folder for each run, including resumed runs.
 
 Progress bars are enabled by default: PPO updates, collected decisions,
 optimizer backward passes, and sampled HF tokens. The token bar may end
@@ -160,6 +160,37 @@ python scripts/serve_training_viewer.py --run runs/task0_both_pc2 --port 8766
 ```
 
 Open http://127.0.0.1:8766 on that PC.
+
+### Resume after a disconnect
+
+Pull the latest code, then run inside `tmux` so SSH disconnects do not stop
+training. Start a session with `tmux new -s muse-ppo`; inside that session:
+
+```bash
+conda activate llm-agent-memory
+cd /data3/may/muse-glimmer-ppo
+mkdir -p runs/task0_ada_resume
+set -o pipefail
+CUDA_VISIBLE_DEVICES=1,2,3 PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python -u scripts/train_ppo.py \
+  --resume runs/task0_ada/checkpoints/update_0002 \
+  --output runs/task0_ada_resume --updates 100 --save-every 1 \
+  2>&1 | tee runs/task0_ada_resume/train.log
+```
+
+`--resume` inherits saved run settings; explicit CLI flags override them.
+`--updates 100` means a total target of 100, so update 2 resumes at update 3.
+The output folder must be fresh, preserving earlier logs and episodes.
+Point the viewer at the new folder. Detach with **Ctrl+B, then D**; reconnect
+later with `tmux attach -t muse-ppo`.
+
+New checkpoints atomically save the adapter, value head, optimizer state,
+update number, run configuration, and Python/Torch/sampler RNG states.
+Resume starts a new simulator episode; in-flight episode state and unfinished
+rollouts are not restored. CUDA RNG is restored when the GPU count matches.
+Older checkpoints such as the original `update_0002` restore the adapter and
+value head and retain update numbering, but start optimizer/RNG state fresh
+because the old format did not save it. This fallback is printed explicitly.
 
 **Option B, faster rollouts.** llama.cpp generates on GPU 0, Hugging Face
 trains on GPU 1. After every update the LoRA is converted to GGUF and the
@@ -254,7 +285,7 @@ The viewer uses only Python's standard library and does not load the model.
 
 ## Status
 
-50 tests pass, including offline training-loop progress and scoring-gradient
+54 tests pass, including checkpoint restore, offline training-loop progress and scoring-gradient
 checks. Muse loads in 4-bit on 2x A5000 24 GB cards; its native XML tool calls
 parse and execute in LIBERO. A two-decision PPO update saved a checkpoint.
 With bf16 autocast and CPU activation offloading, a recorded 14,402-token

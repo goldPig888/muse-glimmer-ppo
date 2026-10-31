@@ -35,8 +35,12 @@ def test_training_prints_phases_and_saves_checkpoint_without_gpu(tmp_path, monke
             return h.log_softmax(0), self.value_head(h).squeeze() if with_value else None
 
         def save(self, path):
-            path.mkdir(parents=True)
+            path.mkdir(parents=True, exist_ok=True)
             (path / 'saved.txt').write_text('saved')
+            torch.save(self.state_dict(), path / 'weights.pt')
+
+        def load(self, path):
+            self.load_state_dict(torch.load(path / 'weights.pt', weights_only=True))
 
     class FakeEnv:
         tools = None
@@ -71,3 +75,26 @@ def test_training_prints_phases_and_saves_checkpoint_without_gpu(tmp_path, monke
     assert (tmp_path / 'checkpoints/update_0001/saved.txt').exists()
     assert json.loads((tmp_path / 'metrics.jsonl').read_text())['update'] == 1
     assert (tmp_path / 'train.pid').read_text().strip().isdigit()
+    first_state = torch.load(tmp_path / 'checkpoints/update_0001/training_state.pt', weights_only=True)
+    resumed = tmp_path / 'resumed'
+    monkeypatch.setattr('sys.argv', ['train_ppo.py', '--output', str(resumed), '--resume',
+                                   str(tmp_path / 'checkpoints/update_0001'), '--updates', '2'])
+    main()
+    resumed_output = capsys.readouterr()
+    assert 'next update=2' in resumed_output.out
+    assert 'restored optimizer' in resumed_output.out
+    assert json.loads((resumed / 'metrics.jsonl').read_text())['update'] == 2
+    second_state = torch.load(resumed / 'checkpoints/update_0002/training_state.pt', weights_only=True)
+    first_step = next(iter(first_state['optimizer']['state'].values()))['step']
+    second_step = next(iter(second_state['optimizer']['state'].values()))['step']
+    assert second_step == first_step * 2
+
+    # Older adapters/value heads can continue without optimizer state.
+    (tmp_path / 'checkpoints/update_0001/training_state.pt').unlink()
+    legacy = tmp_path / 'legacy_resumed'
+    monkeypatch.setattr('sys.argv', ['train_ppo.py', '--output', str(legacy), '--resume',
+                                   str(tmp_path / 'checkpoints/update_0001'), '--updates', '2'])
+    main()
+    assert 'optimizer and RNG states were not saved and start fresh' in capsys.readouterr().out
+    legacy_state = torch.load(legacy / 'checkpoints/update_0002/training_state.pt', weights_only=True)
+    assert next(iter(legacy_state['optimizer']['state'].values()))['step'] == first_step

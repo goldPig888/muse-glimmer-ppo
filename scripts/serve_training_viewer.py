@@ -104,7 +104,7 @@ class RunReader:
             except (OSError, ValueError, IndexError):
                 pass
             target = int(args.get('updates', 100))
-            update = int(metrics[-1]['update']) if metrics else 0
+            update = int(metrics[-1]['update']) if metrics else int(config.get('resume_from_update', 0))
             complete = update >= target
             batch_size = int(args.get('decisions_per_update', 64))
             collected = max(0, total - sum(int(m.get('decisions', 0)) for m in metrics))

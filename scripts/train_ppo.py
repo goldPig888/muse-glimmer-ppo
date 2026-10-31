@@ -28,6 +28,7 @@ import torch
 from tqdm.auto import tqdm
 
 from glimmer_ppo.paper_env import PaperEnv, PaperEnvConfig
+from glimmer_ppo.checkpoint import checkpoint_config, checkpoint_update, restore_checkpoint, save_checkpoint
 from glimmer_ppo.policy import Policy, PolicyConfig
 from glimmer_ppo.ppo import PPOConfig, explained_variance, gae, kl_penalty, policy_loss, value_loss
 from glimmer_ppo.reward import PotentialConfig, RewardConfig
@@ -38,7 +39,8 @@ from glimmer_ppo.starts import StartSampler, parse_ids
 def build_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--updates', type=int, default=100)
+    p.add_argument('--resume', type=Path, help='checkpoint directory; continue in a fresh --output folder')
+    p.add_argument('--updates', type=int, default=100, help='total target update number, including resumed updates')
     p.add_argument('--save-every', type=int, default=10)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--no-progress', action='store_true', help='disable terminal progress bars (status lines remain)')
@@ -90,7 +92,35 @@ def build_args():
     p.add_argument('--server-gpu', default='0', help='physical GPU id for llama-server')
     p.add_argument('--server-port', type=int, default=8090)
     p.add_argument('--server-ctx', type=int, default=32768)
-    return p.parse_args()
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument('--resume', type=Path)
+    resume, _ = probe.parse_known_args()
+    if resume.resume:
+        try:
+            saved = checkpoint_config(resume.resume)['args']
+            defaults = {}
+            for action in p._actions:
+                if action.dest in {'output', 'resume', 'help', 'no_progress', 'no_token_progress'}:
+                    continue
+                if action.dest not in saved:
+                    continue
+                value = saved[action.dest]
+                if value is None or value == 'None':
+                    value = None
+                elif isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+                    value = value is True or value == 'True'
+                elif action.type is not None:
+                    value = action.type(value)
+                defaults[action.dest] = value
+            p.set_defaults(**defaults)
+        except (OSError, ValueError, KeyError) as exc:
+            p.error(str(exc))
+    args = p.parse_args()
+    if (args.output / 'config.json').exists():
+        p.error('--output already contains a run; choose a fresh folder to preserve its data')
+    if args.resume and checkpoint_update(args.resume) >= args.updates:
+        p.error('--updates must exceed the checkpoint update number')
+    return args
 
 
 def main():
@@ -121,8 +151,10 @@ def main():
                          record_video=args.record_video, reward=RewardConfig())
         sampler = StartSampler(args.suite, parse_ids(args.tasks, 90 if args.suite == 'libero_90' else 10),
                                parse_ids(args.inits, 50), args.demo_states, args.demo_fraction, seed=args.seed)
-    (out / 'config.json').write_text(json.dumps(dict(args={k: str(v) for k, v in vars(args).items()},
-                                                     ppo=asdict(ppo), policy=asdict(pcfg), env=asdict(ecfg)), indent=2))
+    config = dict(resume_from_update=checkpoint_update(args.resume) if args.resume else 0,
+                  args={k: str(v) for k, v in vars(args).items()},
+                  ppo=asdict(ppo), policy=asdict(pcfg), env=asdict(ecfg))
+    (out / 'config.json').write_text(json.dumps(config, indent=2))
 
     (out / 'train.pid').write_text(str(os.getpid()) + '\n')
     log = lambda message: tqdm.write(message)
@@ -133,6 +165,11 @@ def main():
     lora = [p for p in policy.model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW([dict(params=lora, lr=ppo.lr),
                              dict(params=policy.value_head.parameters(), lr=ppo.value_lr or ppo.lr)])
+    completed_updates = 0
+    if args.resume:
+        completed_updates = restore_checkpoint(policy, opt, sampler, args.resume, log)
+        log(f'[ppo] continuing from update {completed_updates}; next update={completed_updates + 1}. '
+            'A fresh simulator episode starts; unfinished rollouts are not restored.')
     log(f'[ppo] LoRA on {policy.n_lora_targets} linear layers, '
         f'{sum(p.numel() for p in lora) / 1e6:.1f}M trainable + value head')
 
@@ -152,6 +189,10 @@ def main():
                                           port=args.server_port, ctx=args.server_ctx,
                                           convert_script=args.llama_convert, hf_base_dir=base_dir),
                              out / 'server').start()
+        if args.resume:
+            adapter_dir = out / 'server' / 'adapter_latest'
+            policy.save_adapter(adapter_dir)
+            server.load_adapter(adapter_dir)
         print(f'[ppo] rollouts on llama-server (GPU {args.server_gpu}), training on this process\'s GPUs', flush=True)
 
     def act(messages):
@@ -162,7 +203,8 @@ def main():
     messages = env.reset(sampler())
     episode_return, episode_log = 0.0, []
 
-    for update in tqdm(range(1, args.updates + 1), desc='PPO updates', unit='update',
+    for update in tqdm(range(completed_updates + 1, args.updates + 1), total=args.updates,
+                       initial=completed_updates, desc='PPO updates', unit='update',
                        position=0, dynamic_ncols=True, disable=args.no_progress):
         t0 = time.time()
         batch = []
@@ -263,7 +305,7 @@ def main():
         if update % args.save_every == 0 or update == args.updates:
             checkpoint = out / 'checkpoints' / f'update_{update:04d}'
             log(f'[ppo] saving checkpoint: {checkpoint}')
-            policy.save(checkpoint)
+            save_checkpoint(policy, opt, sampler, checkpoint, update, config)
             log('[ppo] checkpoint saved')
         if server is not None:
             # Rollouts must come from the updated policy: push the new LoRA to llama.cpp.

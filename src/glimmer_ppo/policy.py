@@ -287,3 +287,14 @@ class Policy(nn.Module):
     def save(self, path):
         self.model.save_pretrained(path)
         torch.save(self.value_head.state_dict(), f'{path}/value_head.pt')
+
+    def load(self, path):
+        """Restore the existing trainable adapter in place (optimizer keeps its parameters)."""
+        from peft import set_peft_model_state_dict
+        from peft.utils.save_and_load import load_peft_weights
+        state = load_peft_weights(str(path), device='cpu')
+        result = set_peft_model_state_dict(self.model, state, adapter_name='default')
+        missing = [k for k in result.missing_keys if 'lora_' in k and '.default.' in k]
+        if missing or result.unexpected_keys:
+            raise ValueError(f'Adapter checkpoint mismatch: missing={missing}, unexpected={result.unexpected_keys}')
+        self.value_head.load_state_dict(torch.load(f'{path}/value_head.pt', map_location='cpu', weights_only=True))
