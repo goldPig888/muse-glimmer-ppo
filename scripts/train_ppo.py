@@ -27,7 +27,6 @@ from pathlib import Path
 import torch
 from tqdm.auto import tqdm
 
-from glimmer_ppo.env import EnvConfig, HarnessEnv
 from glimmer_ppo.paper_env import PaperEnv, PaperEnvConfig
 from glimmer_ppo.policy import Policy, PolicyConfig
 from glimmer_ppo.ppo import PPOConfig, explained_variance, gae, kl_penalty, policy_loss, value_loss
@@ -116,6 +115,8 @@ def main():
         sampler = StartSampler('libero_10', [args.task], train_inits, args.demo_states, args.demo_fraction,
                                seed=args.seed, allow_test_suite=True)
     else:
+        # Paper-mode installs do not need the optional legacy harness package.
+        from glimmer_ppo.env import EnvConfig, HarnessEnv
         ecfg = EnvConfig(max_decisions=args.max_decisions, max_steps=args.max_steps,
                          record_video=args.record_video, reward=RewardConfig())
         sampler = StartSampler(args.suite, parse_ids(args.tasks, 90 if args.suite == 'libero_90' else 10),

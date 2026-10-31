@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import runpy
+import sys
 from types import SimpleNamespace
 
 import torch
@@ -10,6 +11,9 @@ from glimmer_ppo.policy import Policy
 
 
 def test_training_prints_phases_and_saves_checkpoint_without_gpu(tmp_path, monkeypatch, capsys):
+    # Reproduce paper-only environments where the legacy harness is absent.
+    monkeypatch.setitem(sys.modules, 'glimmer_ppo.env', None)
+    monkeypatch.setitem(sys.modules, 'llm_agent_memory.harness', None)
     scope = runpy.run_path(str(Path(__file__).parents[1] / 'scripts/train_ppo.py'))
     main = scope['main']
     globals_ = main.__globals__
