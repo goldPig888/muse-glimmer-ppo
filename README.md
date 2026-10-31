@@ -192,6 +192,61 @@ Older checkpoints such as the original `update_0002` restore the adapter and
 value head and retain update numbering, but start optimizer/RNG state fresh
 because the old format did not save it. This fallback is printed explicitly.
 
+### Reverse curriculum from demonstrations
+
+Pause the current run in tmux with Ctrl+C after confirming the last saved
+checkpoint. Keep its output folder. Run this curriculum as a separate experiment.
+Start before the final release, not in a state where the task is already won:
+
+```bash
+python scripts/extract_start_states.py --demos /path/to/libero_10 \
+  --suite libero_10 --allow-test-suite --tasks 0 --demo-ids 10-49 \
+  --final-release-only --lead 15 --output data/task0_final_release_15.npz
+
+python scripts/check_demo_starts.py --demo-states data/task0_final_release_15.npz \
+  --output data/task0_final_release_15_validated.npz --max-starts 5 \
+  --min-goal-fraction 0.5 --require-grasp
+```
+
+The second command loads only the simulator. It restores and settles each
+candidate, checks that one goal is met, the task is unfinished, and a target
+object is held, and saves only passing states. It also writes a rejection
+report and camera frames. Do not start Muse if no states pass; inspect the
+report and try another offset or demonstration. Simulator-state files must
+match the LIBERO scene/version on the machine running them.
+
+For a short first curriculum trial on the Ada machine (inside tmux):
+
+```bash
+mkdir -p runs/task0_curriculum_release15
+set -o pipefail
+CUDA_VISIBLE_DEVICES=1,2,3 PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python -u scripts/train_ppo.py \
+  --resume runs/task0_ada_resume/checkpoints/update_0003 \
+  --output runs/task0_curriculum_release15 --updates 6 --save-every 1 \
+  --demo-states data/task0_final_release_15_validated.npz \
+  --demo-kinds pre_release --demo-fraction 1 \
+  --decisions-per-update 8 --epochs 1 --minibatch 1 \
+  --max-decisions 12 --max-steps 200 --critic-warmup-updates 4 \
+  2>&1 | tee runs/task0_curriculum_release15/train.log
+```
+
+This resumes at update 4: one critic-warmup update for the changed start
+distribution, then two actor+critic updates. It is a pipeline experiment,
+not evidence that the curriculum has been mastered. Demo-only episodes
+must complete the remaining task; parsed actions alone are insufficient.
+If placement succeeds consistently across starts, extract and validate a
+larger `--lead` (e.g. 30, then 60) and resume the next stage in another fresh
+output folder. Change `--min-goal-fraction` / `--require-grasp` deliberately
+as earlier stages cross the grasp or the first placement. Eventually mix
+original starts back in via `--demo-fraction` and evaluate from the held-out
+initial states with no demo starts.
+
+Demonstration ids are not initial-state ids: selecting demo ids 10–49 does
+not by itself prove that held-out initial states 0–9 are excluded. Audit
+dataset provenance and report this as demonstration-assisted curriculum
+training. The schedule above is manual; it does not automatically promote stages.
+
 **Option B, faster rollouts.** llama.cpp generates on GPU 0, Hugging Face
 trains on GPU 1. After every update the LoRA is converted to GGUF and the
 server restarts with it, so rollouts always come from the latest policy.
@@ -296,7 +351,7 @@ same port and refresh the browser; training and Cloudflare can keep running.
 
 ## Status
 
-55 tests pass, including checkpoint restore, offline training-loop progress and scoring-gradient
+58 tests pass, including demo-start selection, checkpoint restore, offline training-loop progress and scoring-gradient
 checks. Muse loads in 4-bit on 2x A5000 24 GB cards; its native XML tool calls
 parse and execute in LIBERO. A two-decision PPO update saved a checkpoint.
 With bf16 autocast and CPU activation offloading, a recorded 14,402-token

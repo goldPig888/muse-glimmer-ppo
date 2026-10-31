@@ -7,7 +7,7 @@ Two kinds of start, mixed by ``StartSampler``:
   just before a release (made by scripts/extract_start_states.py). These give
   short episodes with clear credit, the "mid-demo starts" of the plan.
 
-LIBERO-10 is never sampled here; it is the held-out test suite.
+LIBERO-10 requires explicit opt-in for single-task experiments.
 """
 from __future__ import annotations
 
@@ -45,18 +45,29 @@ class StartSampler:
         if suite in HELD_OUT_SUITES and not allow_test_suite:
             raise ValueError(f'{suite} is the held-out test suite; pass allow_test_suite=True for a '
                              'single-task run that holds out initial states instead')
+        if not 0.0 <= demo_fraction <= 1.0:
+            raise ValueError('demo_fraction must be between 0 and 1')
+        if not kinds or set(kinds) - {'pre_grasp', 'pre_release'}:
+            raise ValueError('demo kinds must be pre_grasp and/or pre_release')
         self.suite, self.tasks, self.inits = suite, list(tasks), list(inits)
         self.rng = random.Random(seed)
         self.demo: list[Start] = []
         if demo_states:
             data = np.load(demo_states, allow_pickle=False)
+            if 'suite' in data and str(data['suite'].item()) != suite:
+                data.close()
+                raise ValueError('Demo start suite does not match the requested suite')
             for i in range(len(data['task_id'])):
                 if int(data['task_id'][i]) in self.tasks and str(data['kind'][i]) in kinds:
                     state = data['state'][i][:int(data['length'][i])]
                     kind = str(data['kind'][i])
                     self.demo.append(Start(self.suite, int(data['task_id'][i]), sim_state=state,
-                                           settle_gripper=1.0 if kind == 'pre_release' else -1.0,
+                                           settle_gripper=float(data['settle_gripper'][i]) if 'settle_gripper' in data
+                                           else (1.0 if kind == 'pre_release' else -1.0),
                                            label=f"demo{int(data['demo'][i])}_{data['kind'][i]}_{int(data['step'][i])}"))
+            data.close()
+            if demo_fraction > 0 and not self.demo:
+                raise ValueError('No demo starts match the requested tasks/kinds; refusing to fall back to initial states')
         self.demo_fraction = demo_fraction if self.demo else 0.0
 
     def __call__(self) -> Start:

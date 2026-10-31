@@ -57,6 +57,8 @@ def build_args():
     p.add_argument('--inits', default='0-49', help='harness env')
     p.add_argument('--demo-states', type=Path)
     p.add_argument('--demo-fraction', type=float, default=0.0)
+    p.add_argument('--demo-kinds', default='pre_grasp,pre_release',
+                   help='comma-separated demo start types; use pre_release for the last-placement stage')
     # episode limits
     p.add_argument('--max-decisions', type=int, default=80)
     p.add_argument('--max-steps', type=int, default=900)
@@ -143,14 +145,15 @@ def main():
         ecfg = PaperEnvConfig(max_calls=args.max_decisions, max_steps=args.max_steps,
                               reward=PotentialConfig(mode=args.reward))
         sampler = StartSampler('libero_10', [args.task], train_inits, args.demo_states, args.demo_fraction,
-                               seed=args.seed, allow_test_suite=True)
+                               kinds=tuple(args.demo_kinds.split(',')), seed=args.seed, allow_test_suite=True)
     else:
         # Paper-mode installs do not need the optional legacy harness package.
         from glimmer_ppo.env import EnvConfig, HarnessEnv
         ecfg = EnvConfig(max_decisions=args.max_decisions, max_steps=args.max_steps,
                          record_video=args.record_video, reward=RewardConfig())
         sampler = StartSampler(args.suite, parse_ids(args.tasks, 90 if args.suite == 'libero_90' else 10),
-                               parse_ids(args.inits, 50), args.demo_states, args.demo_fraction, seed=args.seed)
+                               parse_ids(args.inits, 50), args.demo_states, args.demo_fraction,
+                               kinds=tuple(args.demo_kinds.split(',')), seed=args.seed)
     config = dict(resume_from_update=checkpoint_update(args.resume) if args.resume else 0,
                   args={k: str(v) for k, v in vars(args).items()},
                   ppo=asdict(ppo), policy=asdict(pcfg), env=asdict(ecfg))
