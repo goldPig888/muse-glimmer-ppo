@@ -13,6 +13,9 @@ MOVE = {'targets': {'x': 0.1, 'z': 0.9}, 'note': 'reach'}
     'thinking... {"name": "move_to", "arguments": {"targets": {"x": 0.1, "z": 0.9}, "note": "reach"}}',
     '{"type": "function", "function": {"name": "move_to", "arguments": "{\\"targets\\": {\\"x\\": 0.1, \\"z\\": 0.9}, \\"note\\": \\"reach\\"}"}}',
     'move_to({"targets": {"x": 0.1, "z": 0.9}, "note": "reach"})',
+    '<|start|>assistant to=move_to<|message|><atem:function_calls>'
+    '<atem:invoke name="move_to"><atem:parameter name="targets">{"x": 0.1, "z": 0.9}</atem:parameter>'
+    '<atem:parameter name="note">reach</atem:parameter></atem:invoke></atem:function_calls><|eot|>',
 ])
 def test_parses_common_formats(text):
     assert parse_tool_call(text) == ('move_to', MOVE)
@@ -24,6 +27,13 @@ def test_takes_last_call_and_rejects_other_tools():
     assert parse_tool_call(text) == ('done', {'summary': 'ok'})
     assert parse_tool_call('{"name": "rm_rf", "arguments": {}}') is None
     assert parse_tool_call('no call here') is None
+
+
+def test_native_xml_calls_require_complete_invocations():
+    assert parse_tool_call('<atem:invoke name="move_to"><atem:parameter name="targets">{"x": 0.1}') is None
+    assert parse_tool_call('<atem:invoke name="rm_rf"></atem:invoke>') is None
+    assert parse_tool_call('<atem:invoke name="done"><atem:parameter name="summary">a &amp; b</atem:parameter></atem:invoke>') == ('done', {'summary': 'a & b'})
+    assert parse_tool_call('move_to({"targets": {"x": 0.1}}) <atem:invoke name="give_up"></atem:invoke>') == ('give_up', {})
 
 
 def test_potential_terms():

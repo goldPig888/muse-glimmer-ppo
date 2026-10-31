@@ -18,12 +18,14 @@ adapters to <output>/checkpoints/update_XXXX.
 """
 import argparse
 import json
+import os
 import random
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 import torch
+from tqdm.auto import tqdm
 
 from glimmer_ppo.env import EnvConfig, HarnessEnv
 from glimmer_ppo.paper_env import PaperEnv, PaperEnvConfig
@@ -40,6 +42,8 @@ def build_args():
     p.add_argument('--updates', type=int, default=100)
     p.add_argument('--save-every', type=int, default=10)
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--no-progress', action='store_true', help='disable terminal progress bars (status lines remain)')
+    p.add_argument('--no-token-progress', action='store_true', help='disable the per-token HF generation bar')
     p.add_argument('--env', choices=['paper', 'harness'], default='paper',
                    help='paper: move_to/done/give_up as in the paper; harness: skill programs')
     # where episodes start
@@ -59,6 +63,10 @@ def build_args():
     # model
     p.add_argument('--model', default=PolicyConfig.model)
     p.add_argument('--load-in-4bit', action='store_true')
+    p.add_argument('--activation-offload', action='store_true',
+                   help='save backward activations in CPU RAM to fit long contexts on smaller GPUs')
+    p.add_argument('--max-prompt-tokens', type=int,
+                   help='bound context by dropping the oldest complete turns; keep task and recent observations')
     p.add_argument('--lora-rank', type=int, default=16)
     p.add_argument('--lora-alpha', type=int, default=32)
     p.add_argument('--max-new-tokens', type=int, default=2048)
@@ -93,7 +101,10 @@ def main():
     out = args.output
     out.mkdir(parents=True, exist_ok=True)
     ppo = PPOConfig(**{k: getattr(args, k) for k in asdict(PPOConfig())})
-    pcfg = PolicyConfig(model=args.model, load_in_4bit=args.load_in_4bit, lora_rank=args.lora_rank,
+    pcfg = PolicyConfig(model=args.model, load_in_4bit=args.load_in_4bit,
+                        activation_offload=args.activation_offload, lora_rank=args.lora_rank,
+                        max_prompt_tokens=args.max_prompt_tokens,
+                        token_progress=not args.no_progress and not args.no_token_progress,
                         lora_alpha=args.lora_alpha, max_new_tokens=args.max_new_tokens,
                         temperature=args.temperature, reasoning_strength=args.reasoning or None)
     if args.env == 'paper':
@@ -112,12 +123,17 @@ def main():
     (out / 'config.json').write_text(json.dumps(dict(args={k: str(v) for k, v in vars(args).items()},
                                                      ppo=asdict(ppo), policy=asdict(pcfg), env=asdict(ecfg)), indent=2))
 
+    (out / 'train.pid').write_text(str(os.getpid()) + '\n')
+    log = lambda message: tqdm.write(message)
+    log(f'[ppo] output={out.resolve()} pid={os.getpid()}')
+    log(f'[ppo] loading {args.model}; 4bit={args.load_in_4bit} '
+        f'activation_offload={args.activation_offload} max_prompt_tokens={args.max_prompt_tokens}')
     policy = Policy(pcfg)
     lora = [p for p in policy.model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW([dict(params=lora, lr=ppo.lr),
                              dict(params=policy.value_head.parameters(), lr=ppo.value_lr or ppo.lr)])
-    print(f'[ppo] LoRA on {policy.n_lora_targets} linear layers, '
-          f'{sum(p.numel() for p in lora) / 1e6:.1f}M trainable + value head', flush=True)
+    log(f'[ppo] LoRA on {policy.n_lora_targets} linear layers, '
+        f'{sum(p.numel() for p in lora) / 1e6:.1f}M trainable + value head')
 
     env = PaperEnv(out / 'episodes', ecfg) if args.env == 'paper' else HarnessEnv(out / 'episodes', ecfg)
     tools = lambda: getattr(env, 'tools', None)
@@ -141,16 +157,25 @@ def main():
         if server is not None:
             return generate_with_server(server, policy, messages, tools())
         return policy.act(messages, tools())
+    log('[ppo] starting simulator and resetting first episode')
     messages = env.reset(sampler())
     episode_return, episode_log = 0.0, []
 
-    for update in range(1, args.updates + 1):
+    for update in tqdm(range(1, args.updates + 1), desc='PPO updates', unit='update',
+                       position=0, dynamic_ncols=True, disable=args.no_progress):
         t0 = time.time()
         batch = []
         # ---- 1. collect -------------------------------------------------
         policy.eval()
+        log(f'[ppo] update {update}/{args.updates}: collecting {ppo.decisions_per_update} decisions')
+        rollout_bar = tqdm(total=ppo.decisions_per_update, desc='Rollout decisions', unit='decision',
+                           position=1, leave=False, dynamic_ncols=True, disable=args.no_progress)
         while len(batch) < ppo.decisions_per_update:
+            log(f'[ppo] update={update} decision={len(batch) + 1}/{ppo.decisions_per_update}: generating reply')
             text, truncated, rec = act(messages)
+            log(f'[ppo] update={update} decision={len(batch) + 1}/{ppo.decisions_per_update} '
+                  f'prompt_tokens={rec["inputs"]["input_ids"].shape[1]} '
+                  f'response_tokens={len(rec["response"])}: scoring policy and reference')
             with torch.no_grad():
                 logp_old, value = policy.score(rec)
                 logp_ref, _ = policy.score(rec, with_value=False, reference=True)
@@ -158,6 +183,10 @@ def main():
             rec.update(logp_old=logp_old.cpu(), value=float(value), reward=reward,
                        kl=float(kl_penalty(logp_old, logp_ref)), done=done, info=info)
             batch.append(rec)
+            rollout_bar.update(1)
+            rollout_bar.set_postfix(reward=f'{reward:.4f}', status=info['status'])
+            log(f'[ppo] action={info.get("tool", "reply")} status={info["status"]} '
+                f'reward={reward:+.4f} sim_steps={info.get("steps", "?")} done={done}')
             episode_return += reward
             if done:
                 episode_log.append(dict(return_=episode_return, success=info['success'],
@@ -167,6 +196,8 @@ def main():
                 messages = env.reset(sampler())
             else:
                 messages = env.messages
+        rollout_bar.close()
+        log(f'[ppo] update {update}: computing advantages')
         last_value = 0.0 if batch[-1]['done'] else policy.value_of(messages, tools())
 
         # ---- 2. advantages ---------------------------------------------
@@ -180,11 +211,16 @@ def main():
         policy.train()
         warmup = update <= ppo.critic_warmup_updates
         stats = dict(clipfrac=[], approx_kl=[], policy_loss=[], value_loss=[])
-        for _ in range(ppo.epochs):
+        log(f'[ppo] update {update}: optimizing ({"critic warmup" if warmup else "actor + critic"})')
+        optim_bar = tqdm(total=ppo.epochs * len(batch), desc='PPO backward passes', unit='decision',
+                         position=1, leave=False, dynamic_ncols=True, disable=args.no_progress)
+        for epoch in range(ppo.epochs):
             order = list(range(len(batch)))
             random.shuffle(order)
             for start in range(0, len(order), args.minibatch):
                 idx = order[start:start + args.minibatch]
+                log(f'[ppo] epoch={epoch + 1}/{ppo.epochs} '
+                    f'minibatch={start // args.minibatch + 1}: backward {len(idx)} decisions')
                 opt.zero_grad(set_to_none=True)
                 for i in idx:
                     rec = batch[i]
@@ -196,9 +232,12 @@ def main():
                     loss = (0.0 if warmup else 1.0) * pl.to(vl.device) + ppo.vf_coef * vl
                     (loss / len(idx)).backward()
                     stats['clipfrac'].append(s['clipfrac']); stats['approx_kl'].append(s['approx_kl'])
-                    stats['policy_loss'].append(float(pl)); stats['value_loss'].append(float(vl))
+                    stats['policy_loss'].append(float(pl.detach())); stats['value_loss'].append(float(vl.detach()))
+                    optim_bar.update(1)
+                    optim_bar.set_postfix(value_loss=f'{float(vl.detach()):.4f}')
                 torch.nn.utils.clip_grad_norm_(policy.trainable_parameters(), ppo.max_grad_norm)
                 opt.step()
+        optim_bar.close()
 
         # ---- 4. log -----------------------------------------------------
         mean = lambda xs: sum(xs) / len(xs) if xs else float('nan')
@@ -219,9 +258,12 @@ def main():
         with (out / 'episodes.jsonl').open('a') as f:
             for e in done_eps:
                 f.write(json.dumps(dict(update=update, **e)) + '\n')
-        print(json.dumps(row), flush=True)
+        log(json.dumps(row))
         if update % args.save_every == 0 or update == args.updates:
-            policy.save(out / 'checkpoints' / f'update_{update:04d}')
+            checkpoint = out / 'checkpoints' / f'update_{update:04d}'
+            log(f'[ppo] saving checkpoint: {checkpoint}')
+            policy.save(checkpoint)
+            log('[ppo] checkpoint saved')
         if server is not None:
             # Rollouts must come from the updated policy: push the new LoRA to llama.cpp.
             t1 = time.time()
@@ -232,6 +274,7 @@ def main():
     env.close()
     if server is not None:
         server.stop()
+    log('[ppo] training complete')
 
 
 if __name__ == '__main__':

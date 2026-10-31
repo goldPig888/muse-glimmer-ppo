@@ -92,6 +92,75 @@ python scripts/train_ppo.py --output /metadisk/may/ppo/task0_both --env paper --
     --train-inits 10-49 --reward both --load-in-4bit
 ```
 
+On 2x 24 GB A5000s, add `--activation-offload` and set
+`PYTORCH_ALLOC_CONF=expandable_segments:True`. This stores saved backward
+activations in CPU RAM and trades transfer time for GPU memory. Scoring
+disables the KV cache and captures only the critic's final hidden token,
+rather than retaining every layer's full hidden states. Generation and scoring
+use bf16 autocast so fp32 LoRA weights do not produce full-size fp32 adapter
+activations. Add `--max-prompt-tokens 12288` to bound history by removing the
+oldest complete turns while keeping the task and at least two recent turns.
+This changes the context available to the policy, but generation and PPO
+scoring use the same context. A short smoke test does not verify memory use
+once an episode's conversation grows.
+
+To stress-test a recorded episode before a long run:
+
+```bash
+python scripts/check_long_context.py --episode <episode-directory> \
+    --output runs/context_check --response-tokens 2048 --activation-offload
+```
+
+This tests policy/reference scoring and backward gradients on the recorded
+conversation with a synthetic full-length response; it does not update the policy.
+
+### Run on another PC with terminal progress
+
+Use the existing `llm-agent-memory` environment with the simulator and a
+PyTorch build compatible with that PC's NVIDIA driver. From this checkout:
+
+```bash
+conda activate llm-agent-memory
+git pull --ff-only
+python -m pip install -e '.[qlora,dev,demos]'
+python -c 'import torch; print(torch.__version__, torch.version.cuda); print("CUDA available:", torch.cuda.is_available()); print("GPU count:", torch.cuda.device_count())'
+python -m pytest -q
+python scripts/check_paper_env.py --task 0 --init 10
+
+mkdir -p runs/task0_both_pc2
+set -o pipefail
+PYTORCH_ALLOC_CONF=expandable_segments:True python -u scripts/train_ppo.py \
+  --output runs/task0_both_pc2 --env paper --task 0 --train-inits 10-49 \
+  --reward both --load-in-4bit --activation-offload --max-prompt-tokens 12288 \
+  --save-every 1 2>&1 | tee runs/task0_both_pc2/train.log
+```
+
+Stop if CUDA is unavailable; fix the PyTorch/driver pairing before training.
+The sibling `llm-agent-memory` checkout and its simulator assets are required
+on the other PC too; this repository does not contain them or model weights.
+Choose a fresh output folder for each run; this script does not resume optimizer state.
+
+Progress bars are enabled by default: PPO updates, collected decisions,
+optimizer backward passes, and sampled HF tokens. The token bar may end
+before its maximum when Muse emits an end token. Status lines announce
+model loading, generation, policy/reference scoring, action results,
+rewards, optimization, and checkpoint saves. `python -u` makes redirected
+output immediate; `tee` displays and saves both output streams. Use
+`--no-token-progress` to hide only the token bar or `--no-progress` to hide
+all trainer bars while retaining status lines.
+
+For a short first test, use a different output folder and append
+`--updates 1 --decisions-per-update 2 --epochs 1 --minibatch 1 --max-decisions 2`.
+This verifies the pipeline, not memory use at maximum episode length.
+
+In a second terminal, activate the same environment and start the viewer:
+
+```bash
+python scripts/serve_training_viewer.py --run runs/task0_both_pc2 --port 8766
+```
+
+Open http://127.0.0.1:8766 on that PC.
+
 **Option B, faster rollouts.** llama.cpp generates on GPU 0, Hugging Face
 trains on GPU 1. After every update the LoRA is converted to GGUF and the
 server restarts with it, so rollouts always come from the latest policy.
@@ -154,6 +223,20 @@ Watch `runs/task0/metrics.jsonl`: `mean_reward`, `success_rate`, `invalid`
 (should fall first), `approx_kl` (small), `clipfrac` (about 0.1 to 0.3),
 `explained_variance` (rising toward 1).
 
+## Live training viewer
+
+```bash
+python scripts/serve_training_viewer.py --run /metadisk/may/ppo/task0_both --port 8766
+```
+
+Open http://127.0.0.1:8766 on the training machine. The read-only viewer
+refreshes every two seconds with batch progress, camera frames, episode
+history, parsed tool calls and raw reasoning, GPU memory, and the training
+log. Learning curves appear after completed PPO updates. Frames refresh
+after robot actions, rather than during generation. `train.pid` in the run
+directory enables process status; the background launcher writes this file.
+The viewer uses only Python's standard library and does not load the model.
+
 ## Design choices
 
 - **Paper code for everything the model sees and does.** Episode, prompt,
@@ -171,8 +254,10 @@ Watch `runs/task0/metrics.jsonl`: `mean_reward`, `success_rate`, `invalid`
 
 ## Status
 
-Tests pass (PPO math, both rewards, tool-call parsing, LoRA target
-selection). `check_env.py` (harness) ran on LIBERO-90 task 0 and
-`check_paper_env.py` ran on LIBERO-10 task 0 in the simulator. Not yet run
-with Muse: the model loading, its tool-call text format and the training loop
-need the first real run on a GPU.
+50 tests pass, including offline training-loop progress and scoring-gradient
+checks. Muse loads in 4-bit on 2x A5000 24 GB cards; its native XML tool calls
+parse and execute in LIBERO. A two-decision PPO update saved a checkpoint.
+With bf16 autocast and CPU activation offloading, a recorded 14,402-token
+prompt plus a synthetic 2,048-token response passed policy/reference scoring
+and backward, with peak PyTorch allocations of 17.86 / 19.15 GiB. This is a
+memory stress test, not a completed training run or a demonstrated task success.

@@ -8,6 +8,7 @@ the reply (reasoning may mention earlier drafts):
 * {"name": "move_to", "arguments": {...}}  (arguments may be a JSON string)
 * {"type": "function", "function": {"name": ..., "arguments": ...}}
 * move_to({...})
+* <atem:invoke name="move_to"><atem:parameter name="targets">{...}</atem:parameter>...</atem:invoke>
 
 Run scripts/show_reply.py once on the real model and add Muse's exact
 format here if it is different. A reply with no recognisable call is
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import xml.etree.ElementTree as ET
 
 ROBOT_TOOLS = ('move_to', 'done', 'give_up')
 _decoder = json.JSONDecoder()
@@ -56,6 +58,28 @@ def _json_objects(text):
 def parse_tool_call(text: str):
     """Return (name, arguments) of the last robot tool call in ``text``, or None."""
     found = []
+    # Muse's native tool format. Only accept complete invocations so a
+    # truncated generation cannot execute a partially emitted call.
+    for m in re.finditer(r'<atem:invoke\b[^>]*>.*?</atem:invoke>', text, re.DOTALL):
+        try:
+            root = ET.fromstring('<root xmlns:atem="urn:atem">' + m.group() + '</root>')
+        except ET.ParseError:
+            continue
+        invoke = root[0]
+        name = invoke.get('name')
+        if name not in ROBOT_TOOLS:
+            continue
+        args = {}
+        for param in invoke.findall('{urn:atem}parameter'):
+            key = param.get('name')
+            if key is None:
+                continue
+            value = ''.join(param.itertext())
+            try:
+                args[key] = json.loads(value)
+            except json.JSONDecodeError:
+                args[key] = value
+        found.append((m.start(), (name, args)))
     for obj, start, _ in _json_objects(text):
         call = _as_call(obj)
         if call:
