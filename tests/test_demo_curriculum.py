@@ -63,3 +63,24 @@ def test_scripted_release_baseline_does_not_move_the_arm():
     result = check['release_in_place'](Env())
     assert result['release_success']
     assert result['release_goal_fraction'] == 1.
+
+
+def test_release_retreat_baseline_opens_before_moving_and_stops_on_success():
+    from types import SimpleNamespace
+    class Env:
+        embodiment = SimpleNamespace(last={'eef_state': [0, 0, .6]})
+        calls = []
+
+        def step(self, text):
+            _, args = parse_tool_call(text)
+            self.calls.append(args['targets'])
+            success = len(self.calls) == 5
+            return .1, success, dict(success=success, status='success' if success else 'ok',
+                                     goal_fraction=1. if success else .5)
+    env = Env()
+    result = check['release_in_place'](env, max_calls=8, retreat_m=.05)
+    assert result['release_success']
+    assert result['release_calls'] == 5
+    assert env.calls[:2] == [{'gripper': 0.}, {'gripper': 0.}]
+    assert env.calls[2]['z'] == pytest.approx(.65)
+    assert len(env.calls) == 5

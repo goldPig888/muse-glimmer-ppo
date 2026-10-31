@@ -226,6 +226,22 @@ After the policy reliably releases across the validated starts, move back
 in small stages (for example leads 1, 3, 5, 10, 15) with reset validation at
 each stage. Scripted release success is a physics check, not policy success.
 
+One opening call may leave the Panda fingers only partly open. If release
+alone fails, a bounded release-and-retreat check is available:
+
+```bash
+python scripts/check_demo_starts.py --demo-states data/task0_release1.npz \
+  --output data/task0_release1_retreat_validated.npz --max-starts 5 \
+  --min-goal-fraction 0.5 --require-grasp --test-release \
+  --release-calls 8 --release-retreat 0.05
+```
+
+It opens twice, retreats vertically by 5 cm on the third call, then holds
+open until success or the eight-call bound. Reports include the number of
+calls used. This validates a release-and-clear-hand lesson, not a one-call
+release lesson. Give training episodes at least this call budget, and keep
+the saved original pre-release states as the starts.
+
 For a short first curriculum trial on the Ada machine (inside tmux):
 
 ```bash
@@ -362,7 +378,7 @@ same port and refresh the browser; training and Cloudflare can keep running.
 
 ## Status
 
-59 tests pass, including demo-start selection, checkpoint restore, offline training-loop progress and scoring-gradient
+60 tests pass, including demo-start selection, checkpoint restore, offline training-loop progress and scoring-gradient
 checks. Muse loads in 4-bit on 2x A5000 24 GB cards; its native XML tool calls
 parse and execute in LIBERO. A two-decision PPO update saved a checkpoint.
 With bf16 autocast and CPU activation offloading, a recorded 14,402-token
