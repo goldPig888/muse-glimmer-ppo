@@ -44,3 +44,32 @@ def test_snapshot_before_first_update_and_after_completion(tmp_path):
     assert final['metrics'][0]['success_rate'] is None
     assert final['successes'] == 1
     json.dumps(final, allow_nan=False)
+
+
+def test_optimizer_curves_follow_incremental_tqdm_output(tmp_path):
+    log = tmp_path / 'train.log'
+    log.write_bytes(b'[ppo] update 3: optimizing (critic warmup)\n'
+                    b'\rPPO backward passes:  1%| | 1/128 [00:30, value_loss=0.01]\x1b[A\r'
+                    b'PPO backward passes:  1%| | 1/128 [00:30, value_loss=0.02]\r'
+                    b'PPO backward passes:  2%| | 2/128 [01:00, value_loss=')
+    reader = RunReader(tmp_path)
+    result = reader.optimizer_progress()
+    assert result['update'] == 3
+    assert result['completed'] == 1
+    assert result['points'][0]['value_loss'] == .02
+    with log.open('ab') as f:
+        f.write(b'3e-3]\r')
+    result = reader.optimizer_progress()
+    assert result['completed'] == 2
+    assert result['points'][-1]['value_loss'] == .003
+    assert len(reader.optimizer_progress()['points']) == 2
+    with log.open('ab') as f:
+        f.write(b'[ppo] update 4: optimizing (critic warmup)\n'
+                b'PPO backward passes:  1%| | 1/128 [00:30, value_loss=0.04]\r')
+    result = reader.optimizer_progress()
+    assert result['update'] == 4
+    assert result['completed'] == 1
+    assert len(result['points']) == 1
+    log.write_text('[ppo] update 5: optimizing\n')
+    assert reader.optimizer_progress()['update'] == 5
+    assert not reader.optimizer_progress()['points']

@@ -8,6 +8,7 @@ import argparse
 import json
 import math
 import logging
+import re
 import mimetypes
 from pathlib import Path
 import subprocess
@@ -41,6 +42,46 @@ class RunReader:
         self.files = {}
         self.gpu_at = 0
         self.gpus = []
+        self.optim_offset = 0
+        self.optim_inode = None
+        self.optim_pending = b''
+        self.optim_update = None
+        self.optim_points = {}
+
+    def optimizer_progress(self):
+        """Recover small backward-pass updates from existing tqdm logs incrementally."""
+        path = self.root / 'train.log'
+        try:
+            stat = path.stat()
+            if stat.st_ino != self.optim_inode or stat.st_size < self.optim_offset:
+                self.optim_offset, self.optim_pending = 0, b''
+                self.optim_update, self.optim_points = None, {}
+                self.optim_inode = stat.st_ino
+            with path.open('rb') as f:
+                f.seek(self.optim_offset)
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.optim_offset += len(chunk)
+                    parts = re.split(b'[\r\n]', self.optim_pending + chunk)
+                    self.optim_pending = parts.pop()
+                    for part in parts:
+                        line = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', part.decode('utf-8', errors='replace'))
+                        update = re.search(r'\[ppo\] update (\d+): optimizing', line)
+                        if update:
+                            self.optim_update = int(update.group(1))
+                            self.optim_points = {}
+                        point = re.search(r'PPO backward passes:.*?(\d+)/(\d+).*?value_loss=([-+\d.eE]+)', line)
+                        if point:
+                            done, total, loss = int(point[1]), int(point[2]), float(point[3])
+                            self.optim_points[done] = dict(step=done, total=total, value_loss=loss)
+        except OSError:
+            pass
+        points = list(self.optim_points.values())[-4096:]
+        return dict(update=self.optim_update, points=points,
+                    completed=points[-1]['step'] if points else 0,
+                    total=points[-1]['total'] if points else 0)
 
     def rows(self, path):
         """Read complete appended JSONL records; retry an unfinished last line."""
@@ -140,6 +181,7 @@ class RunReader:
                 episodes=[dict(id=p.name, decisions=len(turns[p.name])) for p in reversed(folders)],
                 selected=chosen.name if chosen else None, protocol=protocol,
                 turns=recent, events=events[-100:], frames=frames, gpus=self.gpu(), log=log,
+                optimizer=self.optimizer_progress(),
             ))
 
 
@@ -164,6 +206,8 @@ def make_handler(reader):
             try:
                 if request.path == '/':
                     self.send(page.read_bytes(), 'text/html; charset=utf-8')
+                elif request.path == '/live.js':
+                    self.send((page.parent / 'live.js').read_bytes(), 'text/javascript; charset=utf-8')
                 elif request.path == '/api/state':
                     selected = parse_qs(request.query).get('episode', [None])[0]
                     body = json.dumps(reader.snapshot(selected), allow_nan=False).encode()

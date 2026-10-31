@@ -268,6 +268,17 @@ after robot actions, rather than during generation. `train.pid` in the run
 directory enables process status; the background launcher writes this file.
 The viewer uses only Python's standard library and does not load the model.
 
+Live decision curves appear immediately from the selected episode's existing
+`ppo_turns.jsonl`: reward with a rolling 10-decision mean, cumulative episode
+reward, goal fraction, commanded X/Y/Z targets, and gripper commands. Click a
+point to inspect that decision. Command targets are carried forward between
+commands; they are not measured robot positions. A backward-pass value-loss
+curve and pass counter are recovered incrementally from the existing tqdm
+training log, so they also work for training processes started before these
+graphs were added. Those loss values have the precision printed in the log.
+After pulling viewer changes, restart only `serve_training_viewer.py` on the
+same port and refresh the browser; training and Cloudflare can keep running.
+
 ## Design choices
 
 - **Paper code for everything the model sees and does.** Episode, prompt,
@@ -285,7 +296,7 @@ The viewer uses only Python's standard library and does not load the model.
 
 ## Status
 
-54 tests pass, including checkpoint restore, offline training-loop progress and scoring-gradient
+55 tests pass, including checkpoint restore, offline training-loop progress and scoring-gradient
 checks. Muse loads in 4-bit on 2x A5000 24 GB cards; its native XML tool calls
 parse and execute in LIBERO. A two-decision PPO update saved a checkpoint.
 With bf16 autocast and CPU activation offloading, a recorded 14,402-token
