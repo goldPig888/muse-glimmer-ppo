@@ -274,6 +274,41 @@ not by itself prove that held-out initial states 0–9 are excluded. Audit
 dataset provenance and report this as demonstration-assisted curriculum
 training. The schedule above is manual; it does not automatically promote stages.
 
+### Compare frozen curriculum checkpoints
+
+Before adding training or advancing a stage, compare checkpoints on every
+validated start with matching sampling seeds. Run inside tmux:
+
+```bash
+mkdir -p runs/compare_lead2_11_12
+set -o pipefail
+CUDA_VISIBLE_DEVICES=1,2,3 PYTORCH_ALLOC_CONF=expandable_segments:True \
+  /data3/may/miniconda3/envs/llm-agent-memory/bin/python -u \
+  scripts/compare_demo_checkpoints.py \
+  --checkpoints runs/task0_curriculum_release2/checkpoints/update_0011 \
+                runs/task0_curriculum_release2/checkpoints/update_0012 \
+  --demo-states data/task0_release2_retreat_validated.npz \
+  --samples 2 --seed 123 --output runs/compare_lead2_11_12 \
+  2>&1 | tee runs/compare_lead2_11_12/compare.log
+```
+
+Five starts and two repeats produce 10 episodes per checkpoint, 20 total.
+The base model loads once, adapter weights switch in place, and all parameters
+are frozen. No optimizer, PPO scoring, or backward pass runs. Sampling, rewards,
+task, and episode limits come from matching checkpoint configurations.
+Starts that are already successful or no longer hold a target at reset fail
+the comparison rather than count as policy successes or failures.
+
+`results.jsonl` saves each completed episode; `summary.json` contains overall
+and per-start success counts, returns, action counts, and paired outcomes
+(only checkpoint 11 succeeded, only 12 succeeded, both, or neither).
+`progress.json` records the active trial and completed episode count. Each
+checkpoint's episodes also retain simulator frames and tool-call logs.
+This is a separate terminal evaluation; the training viewer remains pointed
+at the earlier run. Keep raw counts visible: 10 episodes per checkpoint give
+an initial comparison, not a statistically conclusive ranking or proof of
+improvement from RL. Use a fresh output directory for another comparison.
+
 **Option B, faster rollouts.** llama.cpp generates on GPU 0, Hugging Face
 trains on GPU 1. After every update the LoRA is converted to GGUF and the
 server restarts with it, so rollouts always come from the latest policy.
@@ -378,7 +413,7 @@ same port and refresh the browser; training and Cloudflare can keep running.
 
 ## Status
 
-60 tests pass, including demo-start selection, checkpoint restore, offline training-loop progress and scoring-gradient
+61 tests pass, including frozen checkpoint comparison, demo-start selection, checkpoint restore, offline training-loop progress and scoring-gradient
 checks. Muse loads in 4-bit on 2x A5000 24 GB cards; its native XML tool calls
 parse and execute in LIBERO. A two-decision PPO update saved a checkpoint.
 With bf16 autocast and CPU activation offloading, a recorded 14,402-token
