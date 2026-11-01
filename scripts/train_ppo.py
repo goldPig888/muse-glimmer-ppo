@@ -40,6 +40,8 @@ def build_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--resume', type=Path, help='checkpoint directory; continue in a fresh --output folder')
+    p.add_argument('--init-policy', type=Path,
+                   help='initialize adapter/value weights only (e.g. SFT); start fresh PPO optimizer and updates')
     p.add_argument('--updates', type=int, default=100, help='total target update number, including resumed updates')
     p.add_argument('--save-every', type=int, default=10)
     p.add_argument('--seed', type=int, default=0)
@@ -102,7 +104,7 @@ def build_args():
             saved = checkpoint_config(resume.resume)['args']
             defaults = {}
             for action in p._actions:
-                if action.dest in {'output', 'resume', 'help', 'no_progress', 'no_token_progress'}:
+                if action.dest in {'output', 'resume', 'init_policy', 'help', 'no_progress', 'no_token_progress'}:
                     continue
                 if action.dest not in saved:
                     continue
@@ -118,6 +120,16 @@ def build_args():
         except (OSError, ValueError, KeyError) as exc:
             p.error(str(exc))
     args = p.parse_args()
+    if args.resume and args.init_policy:
+        p.error('--resume and --init-policy are mutually exclusive')
+    if args.init_policy:
+        try:
+            saved_policy = checkpoint_config(args.init_policy)['policy']
+            for name, value in (('model', args.model), ('lora_rank', args.lora_rank), ('lora_alpha', args.lora_alpha)):
+                if saved_policy[name] != value:
+                    p.error(f'--init-policy requires --{name.replace("_", "-")} {saved_policy[name]}')
+        except (OSError, ValueError, KeyError) as exc:
+            p.error(str(exc))
     if (args.output / 'config.json').exists():
         p.error('--output already contains a run; choose a fresh folder to preserve its data')
     if args.resume and checkpoint_update(args.resume) >= args.updates:
@@ -173,6 +185,9 @@ def main():
         completed_updates = restore_checkpoint(policy, opt, sampler, args.resume, log)
         log(f'[ppo] continuing from update {completed_updates}; next update={completed_updates + 1}. '
             'A fresh simulator episode starts; unfinished rollouts are not restored.')
+    elif args.init_policy:
+        policy.load(args.init_policy)
+        log('[ppo] initialized policy weights; fresh optimizer, update counter and critic warmup')
     log(f'[ppo] LoRA on {policy.n_lora_targets} linear layers, '
         f'{sum(p.numel() for p in lora) / 1e6:.1f}M trainable + value head')
 
@@ -192,7 +207,7 @@ def main():
                                           port=args.server_port, ctx=args.server_ctx,
                                           convert_script=args.llama_convert, hf_base_dir=base_dir),
                              out / 'server').start()
-        if args.resume:
+        if args.resume or args.init_policy:
             adapter_dir = out / 'server' / 'adapter_latest'
             policy.save_adapter(adapter_dir)
             server.load_adapter(adapter_dir)

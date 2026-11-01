@@ -309,6 +309,80 @@ at the earlier run. Keep raw counts visible: 10 episodes per checkpoint give
 an initial comparison, not a statistically conclusive ranking or proof of
 improvement from RL. Use a fresh output directory for another comparison.
 
+### Teach successful tool calls before PPO
+
+`scripts/prepare_teacher_demos.py` packages successful Astra episodes from an
+LLM_LIBERO results JSON (also accepts `.json.gz`) plus the original campaign
+directories. It pairs the executed transcript with the saved provider response
+and exact pre-action PNG blobs, checking image hashes and the original simulator
+success report. It exports visible history and `move_to` targets, excluding
+error responses and stop-tool targets. Hidden/encrypted reasoning is never
+exported. An action from a successful episode can still be inefficient or
+mistaken; these are imitation examples, not certified expert actions.
+
+```bash
+python scripts/prepare_teacher_demos.py \
+  --results /path/to/corrected_results.json.gz \
+  --campaigns /path/to/libero_experiments_20260930 \
+  --train-inits 0-7 --validation-inits 8-9 \
+  --output data/astra_task0_sft_v1
+```
+
+The portable output contains `examples.jsonl`, `images/` and `audit.json`.
+Missing recordings, continuations requiring stitching, mismatched calls and
+unconfirmed outcomes are recorded as skipped episodes. Original visible
+prompts and tool results are preserved; these differ somewhat from PaperEnv's
+wording, so actual robot evaluation is necessary after imitation. Only the
+latest two observations retain images. Initial states, including different
+teacher effort levels on the same state, stay together in one split.
+Training on any original evaluation states means the old 0–9 benchmark is
+no longer untouched. Choose and report a separate evaluation split; validation
+action likelihood alone does not measure robot success.
+
+Check image processing and native Muse target token boundaries before loading
+the model. `--offline` uses the cached processor. Omitting it allows downloading
+processor files. This check makes no model calls and performs no training:
+
+```bash
+python scripts/train_sft.py --dataset data/astra_task0_sft_v1 \
+  --check-only --offline --max-validation-examples 1000
+```
+
+Start with a small supervised trial on the RTX 6000 Ada machine. This example
+starts from the base model; optionally add `--init-policy <PPO checkpoint>` to
+initialize from an existing adapter. Its optimizer starts fresh. Only LoRA
+weights train, with response-only cross entropy at temperature 1; the value
+head is frozen. Gradients never train on user/image tokens or teacher reasoning.
+The trainer prints tqdm and per-example losses, and writes `metrics.jsonl` and
+`progress.json`. The existing PPO viewer does not display these SFT metrics.
+
+```bash
+mkdir -p runs/task0_astra_sft_trial
+set -o pipefail
+CUDA_VISIBLE_DEVICES=1,2,3 PYTORCH_ALLOC_CONF=expandable_segments:True \
+  /data3/may/miniconda3/envs/llm-agent-memory/bin/python -u scripts/train_sft.py \
+  --dataset data/astra_task0_sft_v1 --output runs/task0_astra_sft_trial \
+  --epochs 1 --lr 1e-5 --accumulate 8 \
+  --max-train-examples 64 --max-validation-examples 16 \
+  2>&1 | tee runs/task0_astra_sft_trial/train.log
+```
+
+Adapters and the frozen value head are saved to `epoch_0001/`, with training
+configuration. These are weights-only checkpoints, not resumable PPO optimizer
+states. Evaluate robot behavior against the starting model before continuing.
+To start a **new** PPO experiment from these weights, use `--init-policy`, not
+`--resume`; the PPO optimizer, update count and critic warmup start fresh:
+
+```bash
+python scripts/train_ppo.py --env paper --task 0 --load-in-4bit \
+  --init-policy runs/task0_astra_sft_trial/epoch_0001 \
+  --output runs/task0_after_astra_sft --train-inits 10-49
+```
+
+Use the previously validated demo-start flags as well when retaining the
+release curriculum. Do not automatically switch to full-task PPO or infer
+improvement from falling supervised loss.
+
 **Option B, faster rollouts.** llama.cpp generates on GPU 0, Hugging Face
 trains on GPU 1. After every update the LoRA is converted to GGUF and the
 server restarts with it, so rollouts always come from the latest policy.

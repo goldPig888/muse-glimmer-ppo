@@ -220,6 +220,29 @@ class Policy(nn.Module):
         return dict(inputs={k: v.cpu() if torch.is_tensor(v) else v for k, v in inputs.items()},
                     response=torch.as_tensor(response_ids, dtype=torch.long))
 
+    def supervised_record(self, messages, target, tools=None):
+        """Use the native chat template, supervising only the final assistant turn.
+
+        Fail on a changed token prefix rather than silently training on prompt
+        tokens or guessing where expanded image tokens end.
+        """
+        if target.get('role') != 'assistant':
+            raise ValueError('Supervision target must be an assistant message')
+        messages, inputs = self._prepare_messages(messages, tools)
+        kwargs = dict(self.cfg.template_kwargs)
+        if tools:
+            kwargs['tools'] = tools
+        if self.cfg.reasoning_strength:
+            kwargs['reasoning_strength'] = self.cfg.reasoning_strength
+        full = self.processor.apply_chat_template(
+            messages + [target], add_generation_prompt=False, tokenize=True,
+            return_dict=True, return_tensors='pt', **kwargs)
+        prefix = inputs['input_ids'][0]
+        ids = full['input_ids'][0]
+        if len(ids) <= len(prefix) or not torch.equal(ids[:len(prefix)], prefix):
+            raise ValueError('Assistant template does not extend the generation prefix exactly')
+        return dict(inputs=inputs, response=ids[len(prefix):].clone())
+
     def save_adapter(self, path):
         """LoRA adapter only (what llama.cpp needs)."""
         self.model.save_pretrained(path)

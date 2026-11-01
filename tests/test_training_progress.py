@@ -98,3 +98,14 @@ def test_training_prints_phases_and_saves_checkpoint_without_gpu(tmp_path, monke
     assert 'optimizer and RNG states were not saved and start fresh' in capsys.readouterr().out
     legacy_state = torch.load(legacy / 'checkpoints/update_0002/training_state.pt', weights_only=True)
     assert next(iter(legacy_state['optimizer']['state'].values()))['step'] == first_step
+
+    # Teacher/SFT weights initialize a new PPO experiment, not an old optimizer.
+    initialized = tmp_path / 'initialized'
+    monkeypatch.setattr('sys.argv', ['train_ppo.py', '--output', str(initialized), '--init-policy',
+                                   str(tmp_path / 'checkpoints/update_0001'), '--updates', '1',
+                                   '--decisions-per-update', '2', '--epochs', '1', '--minibatch', '1'])
+    main()
+    assert 'fresh optimizer, update counter and critic warmup' in capsys.readouterr().out
+    initialized_state = torch.load(initialized / 'checkpoints/update_0001/training_state.pt', weights_only=True)
+    assert initialized_state['update'] == 1
+    assert next(iter(initialized_state['optimizer']['state'].values()))['step'] == first_step
