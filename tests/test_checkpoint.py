@@ -64,3 +64,28 @@ def test_failed_checkpoint_is_not_published(tmp_path):
     with pytest.raises(RuntimeError, match='disk failure'):
         save_checkpoint(BrokenPolicy(), None, None, tmp_path / 'update_0001', 1, {})
     assert not (tmp_path / 'update_0001').exists()
+
+
+def test_checkpoint_restores_assistance_handoff_state(tmp_path):
+    from glimmer_ppo.assistance import AssistanceCurriculum
+    class Sampler:
+        rng = random.Random(5)
+        curriculum = AssistanceCurriculum(window=2)
+
+        def state_dict(self):
+            return self.curriculum.state_dict()
+
+        def load_state_dict(self, state):
+            self.curriculum.load_state_dict(state)
+    sampler = Sampler()
+    sampler.curriculum.observe(dict(gain=1., object_score=.9, motion_score=.9, contact_score=.9, success=True))
+    policy = TinyPolicy()
+    optimizer = torch.optim.AdamW(policy.parameters())
+    path = tmp_path / 'update_0001'
+    save_checkpoint(policy, optimizer, sampler, path, 1, {'args': {}})
+    sampler.curriculum.history = []
+    restore_checkpoint(policy, optimizer, sampler, path)
+    assert len(sampler.curriculum.history) == 1
+    sampler.curriculum.observe(dict(gain=1., object_score=.9, motion_score=.9, contact_score=.9, success=True))
+    assert sampler.curriculum.advance()
+    assert sampler.curriculum.gain == .8

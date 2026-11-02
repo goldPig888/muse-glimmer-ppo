@@ -60,16 +60,22 @@ class PaperEnv:
             if start.sim_state is not None:
                 e.extra_reset = dict(sim_state=[float(v) for v in start.sim_state],
                                      settle_gripper=float(start.settle_gripper))
+            if start.assistance is not None:
+                e.extra_reset['object_assistance'] = start.assistance
             embodiments.append(e)
             return e
 
         self.episode = Episode(start.task_id, start.init_state, run_dir, factory=factory,
                                max_calls=self.cfg.max_calls, max_steps=self.cfg.max_steps,
-                               meta=dict(start=start.label, ppo=True))
+                               meta=dict(start=start.label, ppo=True,
+                                   start_kind='full_demo_initial_state' if start.assistance else
+                                              'mid_demo' if start.sim_state is not None else 'benchmark_initial_state',
+                                   assistance_gain=start.assistance['gain'] if start.assistance else 0.))
         self.embodiment = embodiments[0]
         reply = self.episode.start()
         self.start = start
         self.progress = self.embodiment.progress
+        self.assistance_returns = dict(self.progress.get('voc', {}).get('returns', {}))
         self.failed_calls = set()
         self.messages = [dict(role='system', content=system_prompt(start.task_id, self.cfg.max_calls)),
                          self._user(reply.text, reply.frames)]
@@ -110,6 +116,12 @@ class PaperEnv:
         progress = self.embodiment.progress
         r = potential_reward(self.cfg.reward, prev_progress=self.progress, progress=progress,
                              success=ep.success, invalid=invalid, repeated=repeated)
+        if 'voc' in progress:
+            current = progress['voc']['returns']
+            for key, value in current.items():
+                r.parts[key] = float(value) - self.assistance_returns.get(key, 0.)
+            self.assistance_returns = dict(current)
+            r.total = sum(r.parts.values())
         self.progress = progress
 
         self.messages.append(dict(role='assistant', content=reply if call is None else '',
@@ -127,6 +139,8 @@ class PaperEnv:
                     lifted=progress.get('lifted_objects_of_interest', []),
                     reach_m=progress.get('reach_m'), carry_m=progress.get('carry_m'),
                     reward_parts=r.parts)
+        if 'voc' in progress:
+            info['voc'] = progress['voc']
         with (ep.run_dir / 'ppo_turns.jsonl').open('a') as log:
             log.write(json.dumps(dict(decision=ep.calls, reply=reply, parsed=call, reward=r.total,
                                       **{k: v for k, v in info.items()}), default=str) + '\n')

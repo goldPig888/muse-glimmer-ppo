@@ -31,6 +31,7 @@ class Start:
     sim_state: Sequence[float] | None = None
     label: str = ''
     settle_gripper: float = -1.0   # +1 keeps the hand closed while settling (start holding an object)
+    assistance: dict | None = None  # privileged object controller configuration; never prompt content
 
 
 @dataclass

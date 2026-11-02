@@ -383,6 +383,121 @@ Use the previously validated demo-start flags as well when retaining the
 release curriculum. Do not automatically switch to full-task PPO or infer
 improvement from falling supervised loss.
 
+### Object-force curriculum from the beginning of the task
+
+This is an experimental **Panda adaptation** of
+[DexMachina's virtual object controllers](https://arxiv.org/html/2505.24853v1#S4.SS3).
+It is not a reproduction of the paper's dexterous-hand policy, contact-position
+reward or residual action space. We retain Glimmer's RGB/proprioception prompts
+and `move_to` actions. A separate simulator controller uses privileged reference
+object poses; this information is never inserted into model messages.
+
+Each episode starts at **frame zero of a full successful LIBERO demonstration**.
+It does not start near release. These are demonstration initial arrangements,
+not arbitrary benchmark initial states. Demo ids and benchmark init-state ids
+are different; hold out demonstration trajectories and audit their provenance
+when reporting generalization.
+
+At every physics substep, bounded PD forces/torques act on the task's target
+objects only. Targets follow the demonstration at the simulator's control rate,
+not wall-clock inference time. The helper does not teleport objects or alter
+robot actuation, masses or gravity. Translational damping uses the object mass;
+rotational damping uses a conservative scalar inertia approximation. Default
+limits at gain 1 are 3 N and 0.10 Nm per object, and limits shrink with gain.
+At gain zero both force and torque are exactly zero. The helper stops after
+the reference trajectory ends.
+
+The additional reward integrates object tracking, end-effector position
+tracking and binary grasp agreement over simulator control steps, normalized
+by reference duration / reference grasp frames. Weights are 0.3 / 0.2 / 0.5.
+It pays no additional bonus for zero-step calls or after the reference ends.
+This is coarser than the paper's hand-motion/contact-location guidance.
+`--reward sparse` retains simulator task success and costs while avoiding
+mixing this experiment with our older potential shaping. A new reward is not
+guaranteed to improve Glimmer; this prototype must be evaluated.
+
+Gains decay only after a window of completed episodes meets **all three**
+tracking thresholds (object 0.8, hand 0.6, grasp 0.5 by default), plus at least
+80% actual simulator task success in the same window. Perfect object
+tracking with an idle hand cannot trigger decay. New levels require a fresh
+window. Existing episodes keep their reset gains; scheduled gains apply to new
+episodes. Checkpoints save the curriculum, its window, RNG and dataset identity.
+With defaults (window 5, decay 0.8, cutoff 0.05), reaching zero requires at least
+70 qualifying episodes. A short smoke trial only checks the pipeline.
+
+On cs94085, first build matched references from the already downloaded HDF5:
+
+```bash
+PPO_PY=/data3/may/miniconda3/envs/llm-agent-memory/bin/python
+"$PPO_PY" scripts/prepare_object_references.py \
+  --demos /data3/may/libero-demos/libero_10 \
+  --task 0 --demo-ids 10-14 --output data/task0_object_refs_train
+```
+
+The exporter checks that the start has no completed goals or existing grasp,
+that final task success holds, and that verified grasp frames are present.
+It records object poses, end-effector poses, grasp labels, the original initial
+state and checksums. Each controller checks its initial object/robot pose
+against that same reference; it refuses an unrelated initial arrangement.
+
+Before loading a model, run a physics-only check. It holds the robot still and
+compares helper gain 1 with 0, saving frames and force measurements:
+
+```bash
+"$PPO_PY" scripts/check_object_assistance.py \
+  --object-references data/task0_object_refs_train \
+  --output runs/task0_object_force_check --steps 300
+```
+
+Assisted success with an idle robot is **helper performance**, not a learned
+skill. Add `--follow-hand` and a fresh output folder to test approximate
+reference-hand pose following, rather than an idle hand. Neither check uses a
+model or proves that PPO will learn. Inspect the check before starting training.
+
+For a bounded 6-update training trial in tmux, starting from the Astra SFT weights:
+
+```bash
+mkdir -p runs/task0_astra_voc_trial
+set -o pipefail
+CUDA_VISIBLE_DEVICES=1,2,3 PYTORCH_ALLOC_CONF=expandable_segments:True \
+  "$PPO_PY" -u scripts/train_ppo.py \
+  --init-policy runs/task0_astra_sft_trial/epoch_0001 \
+  --output runs/task0_astra_voc_trial --env paper --task 0 --load-in-4bit \
+  --object-references data/task0_object_refs_train --reward sparse \
+  --max-decisions 80 --max-steps 900 --max-prompt-tokens 8192 \
+  --decisions-per-update 16 --epochs 1 --minibatch 1 \
+  --critic-warmup-updates 3 --updates 6 --save-every 1 \
+  2>&1 | tee runs/task0_astra_voc_trial/train.log
+```
+
+Do not combine `--object-references` with reverse-curriculum `--demo-states`.
+The viewer supports these runs: point `serve_training_viewer.py --run` at the
+new output folder. It explicitly labels assisted results and plots helper
+strength, trajectory/grasp scores and measured helper forces. The training
+success card includes assisted successes; it is not an independent accuracy.
+
+Evaluate the SFT baseline and PPO checkpoints on the **same** reference starts
+with assistance disabled. For held-out demonstration trajectories, prepare a
+separate directory using e.g. `--demo-ids 15-19` (these are not benchmark init ids).
+The evaluation defaults to gain 0, never advances a curriculum, and verifies
+zero measured helper force and torque:
+
+```bash
+CUDA_VISIBLE_DEVICES=1,2,3 "$PPO_PY" scripts/eval_task.py \
+  --adapter runs/task0_astra_sft_trial/epoch_0001 \
+  --object-references data/task0_object_refs_train --assist-gain 0 \
+  --task 0 --samples 2 --seed 123 --load-in-4bit --max-prompt-tokens 8192 \
+  --output runs/task0_sft_voc_unassisted_baseline
+```
+
+Use another fresh output folder and the PPO adapter path to repeat the same
+evaluation. Each evaluation saves `results.jsonl` and `summary.json` with the
+start type and assistance gain. Benchmark initial-state evaluation remains
+available by omitting `--object-references` and supplying `--inits` explicitly.
+The source papers use much faster, state-based control policies; object
+assistance does not solve Glimmer's slow generation or establish that this
+adaptation will reach the papers' performance.
+
 **Option B, faster rollouts.** llama.cpp generates on GPU 0, Hugging Face
 trains on GPU 1. After every update the LoRA is converted to GGUF and the
 server restarts with it, so rollouts always come from the latest policy.

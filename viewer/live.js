@@ -9,6 +9,10 @@
     ['targets', 'Commanded position targets · meters', [['x','X',colors.x],['y','Y',colors.y],['z','Z',colors.z]]],
     ['gripper', 'Commanded gripper · 0 open / 1 closed', [['gripper','Gripper',colors.gripper]]],
     ['loss', 'Optimizer value loss · backward pass', [['value_loss','Value loss',colors.loss]]],
+    ['voc', 'Object assistance and trajectory tracking', [['gain','Helper strength',colors.gripper],
+      ['object_score','Object tracking',colors.x],['motion_score','Hand tracking',colors.y],['contact_score','Grasp agreement',colors.z]]],
+    ['force', 'Object assistance · force RMS in N', [['force','Force RMS',colors.mean]]],
+    ['curriculum', 'Helper strength scheduled after each PPO update', [['gain','Next episode strength',colors.gripper]]],
   ];
   const byId = id => document.getElementById(id);
   const number = n => n == null ? '—' : Number(n).toLocaleString(undefined, {maximumFractionDigits:4});
@@ -16,6 +20,8 @@
   section.className = 'panel';
   section.innerHTML = '<div class="section-head"><div><h2>Live decision & optimizer curves</h2><p class="caption" id="live-scope">Per decision · selected episode</p></div><span class="tag" id="live-optimizer">Waiting for optimizer</span></div><div class="stats-line" id="live-summary"></div><div class="live-charts" id="live-charts"></div><p class="caption" style="margin-top:12px">Hover points for values; click a decision to inspect its action. Targets show commands, not measured motion. Reward curves describe rollouts; optimizer loss describes training.</p>';
   document.querySelector('.layout').before(section);
+  const assistanceNote=document.createElement('p');assistanceNote.className='caption';assistanceNote.hidden=true;
+  section.prepend(assistanceNote);
   const style = document.createElement('style');
   style.textContent = '.live-charts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:15px}.live-chart{border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}.live-chart svg{width:100%;height:150px;display:block}.live-title{font-size:12px;display:flex;justify-content:space-between;gap:8px}.live-value{color:var(--mint)}.live-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--muted);min-height:20px}.live-legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}.live-point{cursor:pointer}.live-point:focus{outline:none;stroke:white;stroke-width:3}@media(max-width:1100px){.live-charts{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){.live-charts{grid-template-columns:1fr}}';
   document.head.append(style);
@@ -35,7 +41,7 @@
     panel.append(title,legend,host); byId('live-charts').append(panel);
   }
 
-  function draw(id, rows, series, {percent=false, optimizer=false, steps=false}={}) {
+  function draw(id, rows, series, {percent=false, optimizer=false, steps=false, axisLabel='decision'}={}) {
     const host=byId('live-plot-'+id); host.replaceChildren();
     const values=rows.flatMap(r=>series.map(([key])=>r[key])).filter(Number.isFinite);
     if (!values.length) {
@@ -64,23 +70,29 @@
         d+=prev?(steps?`H${x(r.step)}V${y(r[key])}`:`L${x(r.step)},${y(r[key])}`):`M${x(r.step)},${y(r[key])}`;prev=r;
         const dot=add('circle',{cx:x(r.step),cy:y(r[key]),r:2.7,fill:r.invalid&&key==='reward'?'#ff9d9d':color,class:'live-point',tabindex:0});
         const tip=document.createElementNS(ns,'title');
-        tip.textContent=`${optimizer?'Backward pass':'Decision'} ${r.step} · ${name}: ${number(r[key])}${r.tool?' · '+r.tool+' · '+r.status:''}`;dot.append(tip);
-        if(!optimizer){const select=()=>window.selectLiveDecision?.(r.step);dot.onclick=select;dot.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select()}};}
+        tip.textContent=`${optimizer?'Backward pass':axisLabel} ${r.step} · ${name}: ${number(r[key])}${r.tool?' · '+r.tool+' · '+r.status:''}`;dot.append(tip);
+        if(!optimizer&&id!=='curriculum'){const select=()=>window.selectLiveDecision?.(r.step);dot.onclick=select;dot.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();select()}};}
       }
       // Keep dots above the curve for pointer and keyboard interaction.
       const path=add('path',{d,fill:'none',stroke:color,'stroke-width':key==='mean'?2:1.4,'pointer-events':'none'});
       svg.insertBefore(path,svg.firstChild);
     }
-    for(const [value,anchor]of [[rows[0].step,'start'],[rows.at(-1).step,'end']])add('text',{x:x(value),y:145,fill:'#94a6b4','font-size':10,'text-anchor':anchor},(optimizer?'pass ':'decision ')+value);
+    for(const [value,anchor]of [[rows[0].step,'start'],[rows.at(-1).step,'end']])add('text',{x:x(value),y:145,fill:'#94a6b4','font-size':10,'text-anchor':anchor},(optimizer?'pass ':axisLabel+' ')+value);
     host.append(svg);
   }
 
   let signature='';
   window.renderLive = s => {
+    const assistedRun=s.config.object_references&&s.config.object_references!=='None';
+    assistanceNote.hidden=!assistedRun;
+    if(assistedRun){const v=s.turns.at(-1)?.voc;assistanceNote.textContent=v?
+      `Full-task demonstration start · selected episode helper strength ${number(v.gain)} · peak force ${number(v.max_force_N)} N. Tracking scores accumulate over the reference duration. Success counts include assisted episodes; measure independent performance with helper strength 0.`:
+      'Object-force curriculum · waiting for the first action. Success counts include assisted episodes.';}
+    for(const id of ['voc','force','curriculum'])byId('live-plot-'+id).parentElement.hidden=!assistedRun;
     const optim=s.optimizer||{points:[],completed:0,total:0};
     byId('live-optimizer').textContent=optim.total?`Update ${optim.update??(s.phase==='optimizing'?s.update+1:s.update)} · backward ${optim.completed}/${optim.total}`:'Optimizer has not started';
     byId('live-scope').textContent='Selected episode: '+(s.selected||'waiting')+' · refreshes every 2 seconds';
-    const next=JSON.stringify([s.selected,s.turns,optim]);
+    const next=JSON.stringify([s.selected,s.turns,optim,s.metrics]);
     if(next===signature)return;signature=next;
     let cumulative=0,windowRewards=[],targets={x:null,y:null,z:null,gripper:null};
     const rows=s.turns.map(r=>{
@@ -89,12 +101,16 @@
       const commanded=r.parsed?.[1]?.targets||{};
       for(const axis of Object.keys(targets))if(Number.isFinite(commanded[axis]))targets[axis]=commanded[axis];
       return {step:r.decision,reward,mean:windowRewards.reduce((a,b)=>a+b,0)/windowRewards.length,
-        return:cumulative,goal:r.goal_fraction,...targets,tool:r.tool,status:r.status,invalid:r.status==='invalid'};
+        return:cumulative,goal:r.goal_fraction,...targets,tool:r.tool,status:r.status,invalid:r.status==='invalid',
+        gain:r.voc?.gain,object_score:r.voc?.object_score,motion_score:r.voc?.motion_score,
+        contact_score:r.voc?.contact_score,force:r.voc?.force_rms_N};
     });
     const invalid=s.turns.filter(r=>r.status==='invalid').length;
     const summary=byId('live-summary');summary.replaceChildren();
     for(const text of [`${rows.length} decisions`,`Reward sum ${number(cumulative)}`,`Mean reward ${rows.length?number(cumulative/rows.length):'—'}`,`${invalid} invalid calls`]){const el=document.createElement('span');el.textContent=text;summary.append(el)}
-    for(const [id,,series]of specs)draw(id,id==='loss'?optim.points:rows,series,
-      {percent:id==='goal',optimizer:id==='loss',steps:id==='targets'||id==='gripper'});
+    const curriculumRows=s.metrics.map(m=>({step:m.update,gain:m.assistance_next_gain}));
+    for(const [id,,series]of specs)draw(id,id==='loss'?optim.points:id==='curriculum'?curriculumRows:rows,series,
+      {percent:['goal','voc','curriculum'].includes(id),optimizer:id==='loss',steps:['targets','gripper','curriculum'].includes(id),
+       axisLabel:id==='curriculum'?'update':'decision'});
   };
 })();

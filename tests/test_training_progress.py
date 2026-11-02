@@ -109,3 +109,45 @@ def test_training_prints_phases_and_saves_checkpoint_without_gpu(tmp_path, monke
     initialized_state = torch.load(initialized / 'checkpoints/update_0001/training_state.pt', weights_only=True)
     assert initialized_state['update'] == 1
     assert next(iter(initialized_state['optimizer']['state'].values()))['step'] == first_step
+
+    from glimmer_ppo.assistance import AssistanceConfig, AssistanceCurriculum
+    import random
+    class FakeAssistedSampler:
+        config = AssistanceConfig()
+        manifest_hash = 'fixture'
+        rng = random.Random(1)
+        curriculum = AssistanceCurriculum(window=1)
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __call__(self):
+            return SimpleNamespace(label='full_demo_start', task_id=0,
+                                   gain=self.curriculum.gain)
+
+        def state_dict(self):
+            return dict(curriculum=self.curriculum.state_dict())
+
+    class FakeAssistedEnv(FakeEnv):
+        def reset(self, start):
+            self.start = start
+            return []
+
+        def step(self, text, truncated):
+            reward, done, info = super().step(text, truncated)
+            info['voc'] = dict(gain=self.start.gain, assisted=True, object_score=.9,
+                               motion_score=.9, contact_score=.9, force_rms_N=1., impulse_Ns=.1)
+            info['success'] = True
+            return reward, done, info
+    monkeypatch.setitem(globals_, 'AssistedStartSampler', FakeAssistedSampler)
+    monkeypatch.setitem(globals_, 'PaperEnv', FakeAssistedEnv)
+    assisted = tmp_path / 'assisted'
+    monkeypatch.setattr('sys.argv', ['train_ppo.py', '--output', str(assisted), '--updates', '1',
+                                   '--object-references', str(tmp_path), '--decisions-per-update', '2',
+                                   '--epochs', '1', '--minibatch', '1'])
+    main()
+    assisted_state = torch.load(assisted / 'checkpoints/update_0001/training_state.pt', weights_only=True)
+    assert assisted_state['sampler_state']['curriculum']['gain'] == .8
+    assisted_metrics = json.loads((assisted / 'metrics.jsonl').read_text())
+    assert assisted_metrics['assisted_episodes'] == 2
+    assert assisted_metrics['assistance_next_gain'] == .8

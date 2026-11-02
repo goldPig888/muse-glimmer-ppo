@@ -41,6 +41,8 @@ def save_checkpoint(policy, optimizer, sampler, path, update, config):
                  python_rng=random.getstate(), torch_rng=torch.get_rng_state(),
                  cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else [],
                  sampler_rng=sampler.rng.getstate() if hasattr(sampler, 'rng') else None)
+    if hasattr(sampler, 'state_dict'):
+        state['sampler_state'] = sampler.state_dict()
     torch.save(state, staging / 'training_state.pt')
     (staging / 'training_config.json').write_text(json.dumps(config, indent=2))
     (staging / 'checkpoint.json').write_text(json.dumps(dict(update=update, format_version=1)))
@@ -64,6 +66,10 @@ def restore_checkpoint(policy, optimizer, sampler, path, log=print):
     torch.set_rng_state(state['torch_rng'])
     if state['sampler_rng'] is not None and hasattr(sampler, 'rng'):
         sampler.rng.setstate(state['sampler_rng'])
+    if 'sampler_state' in state:
+        if not hasattr(sampler, 'load_state_dict'):
+            raise ValueError('Checkpoint requires its original stateful sampler/curriculum')
+        sampler.load_state_dict(state['sampler_state'])
     if state['cuda_rng']:
         if torch.cuda.is_available() and len(state['cuda_rng']) == torch.cuda.device_count():
             torch.cuda.set_rng_state_all(state['cuda_rng'])

@@ -34,6 +34,7 @@ from glimmer_ppo.ppo import PPOConfig, explained_variance, gae, kl_penalty, poli
 from glimmer_ppo.reward import PotentialConfig, RewardConfig
 from glimmer_ppo.rollout_server import LlamaServer, ServerConfig, generate_with_server
 from glimmer_ppo.starts import StartSampler, parse_ids
+from glimmer_ppo.assistance import AssistedStartSampler, AssistanceConfig, AssistanceCurriculum
 
 
 def build_args():
@@ -61,6 +62,18 @@ def build_args():
     p.add_argument('--demo-fraction', type=float, default=0.0)
     p.add_argument('--demo-kinds', default='pre_grasp,pre_release',
                    help='comma-separated demo start types; use pre_release for the last-placement stage')
+    p.add_argument('--object-references', type=Path,
+                   help='full-demo reference directory; enable privileged object-force curriculum')
+    p.add_argument('--assist-gain', type=float, default=1.)
+    p.add_argument('--assist-decay', type=float, default=.8)
+    p.add_argument('--assist-window', type=int, default=5, help='completed episodes required at each gain level')
+    p.add_argument('--assist-minimum', type=float, default=.05)
+    p.add_argument('--assist-force', type=float, default=3., help='maximum assistance per object in N at gain=1')
+    p.add_argument('--assist-torque', type=float, default=.10, help='maximum torque in Nm at gain=1')
+    p.add_argument('--assist-object-threshold', type=float, default=.8)
+    p.add_argument('--assist-motion-threshold', type=float, default=.6)
+    p.add_argument('--assist-contact-threshold', type=float, default=.5)
+    p.add_argument('--assist-success-threshold', type=float, default=.8)
     # episode limits
     p.add_argument('--max-decisions', type=int, default=80)
     p.add_argument('--max-steps', type=int, default=900)
@@ -120,6 +133,8 @@ def build_args():
         except (OSError, ValueError, KeyError) as exc:
             p.error(str(exc))
     args = p.parse_args()
+    if args.object_references and (args.env != 'paper' or args.demo_states or args.demo_fraction):
+        p.error('--object-references requires paper mode and cannot be mixed with mid-task demo starts')
     if args.resume and args.init_policy:
         p.error('--resume and --init-policy are mutually exclusive')
     if args.init_policy:
@@ -158,6 +173,14 @@ def main():
                               reward=PotentialConfig(mode=args.reward))
         sampler = StartSampler('libero_10', [args.task], train_inits, args.demo_states, args.demo_fraction,
                                kinds=tuple(args.demo_kinds.split(',')), seed=args.seed, allow_test_suite=True)
+        if args.object_references:
+            sampler = AssistedStartSampler(args.object_references, args.task,
+                AssistanceConfig(gain=args.assist_gain, max_force=args.assist_force, max_torque=args.assist_torque),
+                AssistanceCurriculum(gain=args.assist_gain, decay=args.assist_decay, window=args.assist_window,
+                    minimum=args.assist_minimum, task_threshold=args.assist_object_threshold,
+                    motion_threshold=args.assist_motion_threshold, contact_threshold=args.assist_contact_threshold,
+                    success_threshold=args.assist_success_threshold),
+                seed=args.seed)
     else:
         # Paper-mode installs do not need the optional legacy harness package.
         from glimmer_ppo.env import EnvConfig, HarnessEnv
@@ -169,11 +192,18 @@ def main():
     config = dict(resume_from_update=checkpoint_update(args.resume) if args.resume else 0,
                   args={k: str(v) for k, v in vars(args).items()},
                   ppo=asdict(ppo), policy=asdict(pcfg), env=asdict(ecfg))
+    if args.object_references:
+        config['object_assistance'] = dict(config=asdict(sampler.config),
+            manifest_hash=sampler.manifest_hash, initial_curriculum=sampler.curriculum.state_dict(),
+            start_kind='full_demo_initial_state', privileged_training=True)
     (out / 'config.json').write_text(json.dumps(config, indent=2))
 
     (out / 'train.pid').write_text(str(os.getpid()) + '\n')
     log = lambda message: tqdm.write(message)
     log(f'[ppo] output={out.resolve()} pid={os.getpid()}')
+    if args.object_references:
+        log(f'[voc] full-task demo starts; gain={sampler.curriculum.gain:.4f}; '
+            'assisted successes are not unassisted evaluation')
     log(f'[ppo] loading {args.model}; 4bit={args.load_in_4bit} '
         f'activation_offload={args.activation_offload} max_prompt_tokens={args.max_prompt_tokens}')
     policy = Policy(pcfg)
@@ -253,6 +283,9 @@ def main():
                 episode_log.append(dict(return_=episode_return, success=info['success'],
                                         decisions=info['decisions'], goal_fraction=info['goal_fraction'],
                                         start=env.start.label, task=env.start.task_id))
+                if args.object_references:
+                    episode_log[-1]['voc'] = info['voc']
+                    sampler.curriculum.observe(dict(info['voc'], success=info['success']))
                 episode_return = 0.0
                 messages = env.reset(sampler())
             else:
@@ -314,6 +347,16 @@ def main():
                    episodes=len(done_eps), success_rate=mean([e['success'] for e in done_eps]),
                    mean_goal_fraction=mean([e['goal_fraction'] for e in done_eps]),
                    **{k: mean(v) for k, v in stats.items()})
+        if args.object_references:
+            changed = sampler.curriculum.advance()
+            row['assistance_next_gain'] = sampler.curriculum.gain
+            row['assistance_batch_gain'] = mean([r['info']['voc']['gain'] for r in batch])
+            row['assisted_episodes'] = sum(e['voc']['assisted'] for e in done_eps)
+            for key in ('object_score', 'motion_score', 'contact_score', 'force_rms_N', 'impulse_Ns'):
+                row['voc_' + key] = mean([e['voc'][key] for e in done_eps])
+            if changed:
+                log(f'[voc] tracking thresholds met: next episode gain={sampler.curriculum.gain:.4f}; '
+                    'current episode retains its reset gain')
         with (out / 'metrics.jsonl').open('a') as f:
             f.write(json.dumps(row) + '\n')
         with (out / 'episodes.jsonl').open('a') as f:

@@ -1,7 +1,7 @@
 """The paper's LIBERO worker, plus reward information.
 
 This is ``inspect_robots_libero/_worker.py`` from LLM_LIBERO (commit 7db834a)
-with three additions and nothing else changed: same 256x256 cameras, same
+with optional reward/start/assistance support: same 256x256 cameras, same
 agentview flip, same rot6d handling, same 10 settling steps.
 
 * every reply carries ``progress`` (BDDL goal predicates, grasp of an object
@@ -10,6 +10,8 @@ agentview flip, same rot6d handling, same 10 settling steps.
 * ``reset`` may take ``sim_state`` (a flattened MuJoCo state from a demo) and
   ``settle_gripper`` (+1 keeps the hand closed while settling).
 * ``get_state`` returns the current flattened MuJoCo state.
+* opt-in ``object_assistance`` installs bounded reference-tracking forces on
+  target objects; disabled for ordinary runs and exactly zero at gain zero.
 """
 import json
 import os
@@ -30,6 +32,7 @@ from libero.libero import benchmark, get_libero_path  # noqa: E402
 from libero.libero.envs import OffScreenRenderEnv  # noqa: E402
 import robosuite.utils.transform_utils as T  # noqa: E402
 import imageio.v2 as imageio  # noqa: E402
+from glimmer_ppo.assistance import AssistanceConfig, ObjectAssistant  # noqa: E402
 
 LIFT_M = 0.03
 
@@ -105,9 +108,13 @@ def main():
     obs = None
     steps = 0
     start_heights = {}
+    assistant = None
 
     def pack():
         robot = env.env.robots[0]
+        measured = progress(env, start_heights)
+        if assistant is not None:
+            measured['voc'] = assistant.summary()
         return {
             'images': {k: (obs[k][::-1, ::-1] if k == 'agentview_image' else obs[k]).copy().tolist() for k in
                        ('agentview_image', 'robot0_eye_in_hand_image')},
@@ -116,7 +123,7 @@ def main():
                 [np.clip((robot.gripper.current_action[-1] + 1.0) / 2.0, 0, 1)])).tolist(),
             'gripper_qpos': obs['robot0_gripper_qpos'].tolist(),
             'success': bool(env.check_success()), 'steps': steps,
-            'progress': progress(env, start_heights),
+            'progress': measured,
         }
 
     try:
@@ -124,6 +131,9 @@ def main():
             req = json.loads(line)
             try:
                 if req['op'] == 'reset':
+                    if assistant is not None:
+                        assistant.close()
+                        assistant = None
                     if env is not None:
                         env.close()
                     if video is not None:
@@ -146,6 +156,12 @@ def main():
                     steps = 0
                     goals = env.env.parsed_problem['goal_state']
                     start_heights = object_heights(env.env, [str(g[1]) for g in goals if len(g) == 3])
+                    if req.get('object_assistance') is not None:
+                        if env.check_success():
+                            raise ValueError('Assisted episode is already successful at its initial state')
+                        settings = dict(req['object_assistance'])
+                        reference = settings.pop('reference')
+                        assistant = ObjectAssistant(env.env, reference, AssistanceConfig(**settings))
                     video = imageio.get_writer(req['video'], fps=20)
                     result = pack()
                     result['instruction'] = task.language
@@ -163,7 +179,11 @@ def main():
                     b = b / np.linalg.norm(b)
                     rotation = np.stack([a, b, np.cross(a, b)], axis=1)
                     action = np.concatenate([action[:3], T.quat2axisangle(T.mat2quat(rotation)), [2 * action[-1] - 1]])
+                    if assistant is not None:
+                        assistant.before_step(steps)
                     obs, _, _, _ = env.step(action)
+                    if assistant is not None:
+                        assistant.after_step(progress(env, start_heights)['grasped_objects_of_interest'])
                     steps += 1
                     result = pack()
                 elif req['op'] == 'get_state':
@@ -182,6 +202,8 @@ def main():
                 wire.write(json.dumps({'error': type(exc).__name__ + ': ' + str(exc)}) + '\n')
                 wire.flush()
     finally:
+        if assistant is not None:
+            assistant.close()
         if video is not None:
             video.close()
         if env is not None:
