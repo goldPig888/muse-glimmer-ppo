@@ -15,7 +15,7 @@ The harness version (skill programs, LIBERO-90) is kept in the repo for later.
 
 For the separate **CaPtain Python/perception pipeline baseline**, see
 [the setup and experiment commands](docs/captain_baseline.md). The launcher uses
-the authors' pinned harness and released checkpoints; the existing `--env paper`
+the authors' pinned harness with Glimmer as the policy under test; `--env paper`
 mode above is the LLM-LIBERO move-only protocol, not CaPtain-Harness.
 
 Plan, formulas and parameters: the "Glimmer RL on LIBERO-90: Plan" doc.

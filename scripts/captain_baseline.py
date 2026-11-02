@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Prepare and evaluate the released CaPtain baseline without changing its harness.
+"""Prepare the pinned CaPtain harness for a Glimmer endpoint comparison.
 
 Uses only the standard library. Install the upstream environments separately;
-see docs/captain_baseline.md. No Muse weights, PPO rewards or assistance are used.
+see docs/captain_baseline.md. Model serving is external; no weights are trained and no custom rewards or assistance are used.
 """
 from __future__ import annotations
 
@@ -120,7 +120,7 @@ def readiness(args):
                 if not data:
                     raise ValueError('no served models')
                 report[name] = data
-                if name == 'policy' and os.environ.get('POLICY_MODEL', 'captain-4b') not in [m['id'] for m in data]:
+                if name == 'policy' and os.environ.get('POLICY_MODEL', 'glimmer') not in [m['id'] for m in data]:
                     raise ValueError('POLICY_MODEL does not match a served model name')
         except (OSError, ValueError, KeyError) as exc:
             problems.append(f'{name}: {exc}')
@@ -169,7 +169,8 @@ def main():
     selected_env = {key: os.environ[key] for key in ('POLICY_URL', 'POLICY_MODEL', 'CAPTAIN_PYTHON',
                    'STUDENT_PYTHON', 'EGL_DEVICE', 'SAM3_URL', 'MOLMO_URL') if key in os.environ}
     # Freeze TEMP at the official evaluation setting; this wrapper does not change prompts or tool schemas.
-    env = dict(os.environ, CAPTAIN_HARNESS=str(harness), TEMP='1.0')
+    env = dict(os.environ, CAPTAIN_HARNESS=str(harness), TEMP='1.0',
+               POLICY_MODEL=os.environ.get('POLICY_MODEL', 'glimmer'))
     command = [sys.executable, str(harness / 'eval/run_jobs.py'), str(args.plan / 'tasks.tsv'),
                '--out', str(args.out), '--parallel', str(args.parallel)]
     if args.dry_run:

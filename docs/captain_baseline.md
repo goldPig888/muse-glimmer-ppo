@@ -1,8 +1,9 @@
-# CaPtain baseline before changing Glimmer
+# Glimmer in the CaPtain pipeline
 
-This experiment uses the authors' code directly, outside our `PaperEnv`. It does
-not train Muse, run our PPO, fit our experimental critic, change rewards, or apply
-object forces. Existing runs and checkpoints remain available.
+The policy under test is **Muse Glimmer 30B**, throughout. We reuse the authors'
+harness and training design, not their Qwen policy. This first stage evaluates
+frozen Glimmer; SFT and RL come after its tool interface works. Existing runs and
+checkpoints remain available.
 
 Sources: [paper §3.1, Appendix A–C](https://arxiv.org/html/2610.40799v1),
 [pipeline](https://github.com/waltstephen/CaPtain),
@@ -26,18 +27,25 @@ poses or success predicates may be substituted for perception outputs.
 
 ## First experiment
 
-Evaluate these three models using **the same unchanged harness and task list**:
+Keep the Glimmer checkpoint fixed for the first two conditions:
 
-1. `Qwen/Qwen3.5-4B`: base model, zero-shot in this harness.
-2. `YijiaFan/CaPtain-4B-SFT`: released SFT baseline.
-3. `YijiaFan/CaPtain-4B`: released RL baseline.
+1. **Glimmer + our existing move-only harness:** the current baseline.
+2. **The same Glimmer + CaPtain-Harness:** persistent Python, perception,
+   geometry, guarded motion and receipts; no new training yet.
+3. **Glimmer + in-harness SFT**, followed by **Glimmer + the physical-critic RL
+   design**. Compare each stage before adding our reward or assistance changes.
 
-Start with LIBERO-10 task 0, official evaluation states 11–16 (six episodes per
-model). This is a task-specific smoke comparison, not a reproduction of the
-paper's aggregate success rate. Repeat over all 240 episodes for that comparison.
-These states become evaluation-only for this new experiment; do not reuse them
-for new training. They were not necessarily held out from our older experiments,
-so old Glimmer checkpoints cannot be described as clean held-out comparisons.
+The authors' Qwen checkpoints are optional external references, not required
+experiments. Swapping Glimmer for Qwen would confound the model and harness.
+Reusing the method with Glimmer is an adaptation, not an exact reproduction of
+CaPtain-4B or a guarantee of its reported success rates.
+
+Start with LIBERO-10 task 0, official states 11–16 (six episodes per condition).
+Use the same states for the paired old/new harness comparison and record both
+sets of budgets: the harnesses have different request/action definitions. This
+is an end-to-end harness comparison, not an isolated tool-count ablation.
+These states are evaluation-only for new training. Older Glimmer checkpoints may
+already have trained on them; do not call those comparisons clean held-out tests.
 
 The downloaded pipeline is pinned to `4bb86546196b80aaa2fa4bd0f9fa697aa7580e8e`;
 its harness submodule is pinned to `de38d6d63b710caf356320a3c046b72b6d299514`.
@@ -94,8 +102,7 @@ calling the test an exact baseline.
 ```bash
 export CAPTAIN_MODELS_DIR=/data3/may/captain-models
 bash scripts/download_models.sh
-bash scripts/models/download_policy.sh 4b-sft
-bash scripts/models/download_policy.sh 4b
+# Keep using the existing Muse Glimmer model weights; no Qwen download.
 ```
 
 ## Start perception and one policy
@@ -104,51 +111,106 @@ Set `TOOLS_PYTHON` to the installed CaP-X/SAM Python and `VLLM_BIN` to the vLLM
 executable. The commands below require those paths to be set; they deliberately
 do not guess another project's Python environment.
 
-Use GPU 1 for the policy, GPU 2 for SAM, GPU 3 for Molmo and rendering. This
-avoids GPU 0's existing job. This placement is an initial test on the 48 GB Ada
-cards, not a verified memory estimate. Start one episode at a time. The policy
-script retains the authors' context and serving settings; if they fail to fit,
-report that failure before reducing context or changing precision.
+The Glimmer serving bridge is `scripts/serve_glimmer_python.py`. It loads the
+frozen base Glimmer model, uses its native HF multimodal template, and accepts
+CaPtain's `python(input=...)` schema. It preserves every complete ATEM call in
+order and matches tool-result IDs. Python source is kept raw, including `<`,
+`&`, quotes, and indentation. Thinking examples are not executable calls;
+truncated or malformed tool replies forward no code.
+
+The server does not execute Python. CaPtain owns the sandboxed persistent
+session, robot tools, state, receipts and images. The model server creates no
+LoRA adapter, value head or optimizer. It accepts inline images, never fetches
+image URLs, and never silently truncates the prompt. It is bound to localhost.
+The server logs request counts, token progress and parse results in the terminal;
+`requests.jsonl` retains its raw generated replies and parsed calls.
+
+This is Glimmer with CaPtain's harness, not an exact reproduction of the Qwen
+training run. The native template and configurable reasoning differ. NF4 is an
+explicit inference setting, not a learned adapter. If a prompt exceeds the
+configured context budget, the server reports an error; it does not hide that
+change by clipping images or history.
+
+### First check: no robot or perception services needed
+
+The existing Glimmer Python environment can run the bridge. Stop any old process
+that **you** started on port 8600 first; do not use a broad process kill.
+
+```bash
+cd /data3/may/muse-glimmer-ppo
+PPO_PY=/data3/may/miniconda3/envs/llm-agent-memory/bin/python
+
+# Cached processor only: no model weights loaded, no generation, no Python run.
+"$PPO_PY" scripts/check_glimmer_python.py --template-only
+
+# In tmux: frozen base Glimmer, two GPUs; GPU 0 remains untouched.
+CUDA_VISIBLE_DEVICES=1,2 \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+"$PPO_PY" -u scripts/serve_glimmer_python.py \
+  --load-in-4bit --port 8600 --output runs/glimmer_python_server
+```
+
+Wait for `[glimmer] ready`. From another terminal:
+
+```bash
+cd /data3/may/muse-glimmer-ppo
+PPO_PY=/data3/may/miniconda3/envs/llm-agent-memory/bin/python
+export STUDENT_PYTHON="$PWD/data/captain/upstream/harness/.venv-student/bin/python"
+"$PPO_PY" -u scripts/check_glimmer_python.py --output runs/glimmer_python_smoke
+```
+
+The live check sends an image, asks Glimmer for Python, executes it in the
+upstream bubblewrap sandbox, returns the receipt, and asks it to reuse a variable
+in a second request. It expects printed `41` then `42`, without a Python restart.
+No robot is moved. A pass checks interface operation; it does not establish
+visual grounding or robot success. The sandbox requires the upstream setup and
+its student Python above; no unsandboxed fallback is used.
+
+If the model returns malformed calls, the live check stops and the server's
+`requests.jsonl` shows the raw reply. If it runs out of memory, keep that failure
+as a resource result before changing context/precision. The 30B model's memory
+use plus perception has not been validated on cs94085 yet.
+
+Perception can use separate GPUs once the separate environments are installed:
 
 ```bash
 cd /data3/may/muse-glimmer-ppo/data/captain/upstream/harness
 : "${TOOLS_PYTHON:?Set TOOLS_PYTHON to the CaP-X/SAM interpreter}"
-: "${VLLM_BIN:?Set VLLM_BIN to the vLLM executable}"
+: "${VLLM_BIN:?Set VLLM_BIN to the Molmo vLLM executable}"
 export SAM3_CHECKPOINT="$CAPTAIN_MODELS_DIR/sam3/sam3.pt"
 export MOLMO_MODEL="$CAPTAIN_MODELS_DIR/Molmo2-8B"
-export SAM3_GPU=2 MOLMO_GPU=3 POLICY_GPU=1 EGL_DEVICE=3
+# After checking free memory: share GPU 3 for perception; Glimmer uses 1,2.
+export SAM3_GPU=3 MOLMO_GPU=3 EGL_DEVICE=3
 bash services/start_perception.sh
-bash services/serve_policy.sh "$CAPTAIN_MODELS_DIR/CaPtain-4B-SFT" 8600
 ```
 
-These scripts detach their services. Follow startup with
-`tail -f logs/services/policy_8600.log`; SAM and Molmo logs are in that directory
-too. **Do not start a second policy on port 8600 until the first is stopped.**
-The launch scripts print their PIDs: stop only the specific policy PID you
-started when switching models. Keep perception running. Do not use broad
-`pkill` commands on this shared machine.
+Keep GPU 0's existing job untouched. Start only one evaluation episode at a time.
+Do not stop other users' services when changing model endpoints.
 
 ## Check, run, and inspect
 
+**Run robot episodes only after the live Glimmer Python check passes and the
+perception services are ready.**
 Keep the exported variables in the same terminal, or re-export them in a tmux
-session. The readiness check validates interpreter versions, imports, `bwrap`
+session. Set `POLICY_URL=http://127.0.0.1:8600/v1` and `POLICY_MODEL=glimmer`. The readiness check validates interpreter versions, imports, `bwrap`
 presence, policy/Molmo model endpoints and SAM route availability. It does not
 prove segmentation inference, bubblewrap permissions or EGL work; the first
 episode is the integration test.
 
 ```bash
 cd /data3/may/muse-glimmer-ppo
+export POLICY_URL=http://127.0.0.1:8600/v1 POLICY_MODEL=glimmer
 python3 scripts/captain_baseline.py check
 
 # Optional: prints the six upstream commands; launches no episodes.
 python3 -u scripts/captain_baseline.py run \
-  --model-source YijiaFan/CaPtain-4B-SFT \
-  --out runs/captain_sft_task0_dry --dry-run
+  --model-source meta-models/Muse-Glimmer-30B \
+  --out runs/glimmer_captain_zeroshot_task0_dry --dry-run
 
 # Run in tmux so a lost SSH connection does not interrupt evaluation.
 python3 -u scripts/captain_baseline.py run \
-  --model-source YijiaFan/CaPtain-4B-SFT \
-  --out runs/captain_sft_task0 --parallel 1
+  --model-source meta-models/Muse-Glimmer-30B \
+  --out runs/glimmer_captain_zeroshot_task0 --parallel 1
 ```
 
 This calls their `eval/run_jobs.py`, which calls their unchanged
@@ -161,8 +223,8 @@ to this terminal. From another terminal:
 
 ```bash
 cd /data3/may/muse-glimmer-ppo
-python3 scripts/captain_baseline.py summary --out runs/captain_sft_task0
-tail -f runs/captain_sft_task0/logs/libero_30.log
+python3 scripts/captain_baseline.py summary --out runs/glimmer_captain_zeroshot_task0
+tail -f runs/glimmer_captain_zeroshot_task0/logs/libero_30.log
 ```
 
 The task 0 / seed 11 official row has ID 30 at the pinned revision. The summary
@@ -171,11 +233,10 @@ reports completed episodes, host success, strict success (host success plus
 errors are not counted as robot-policy failures. Our existing PPO viewer does
 not yet read this upstream output format.
 
-Next stop that policy's PID, serve `YijiaFan/CaPtain-4B` with the same command,
-and evaluate into `runs/captain_rl_task0` with `--model-source` changed accordingly.
-Then repeat for `Qwen/Qwen3.5-4B` into `runs/captain_base_task0`. Keep the task plan,
-perception and settings unchanged. Model sources may also be downloaded local
-paths; record the source revision/hashes alongside the run.
+For the old-harness comparison, evaluate the **same base Glimmer weights** on
+these same initial states using `scripts/eval_task.py`. Our previous SFT
+checkpoint may be evaluated as a separate condition, but it was trained on the
+move-only interface, not on this Python interface. Do not mix those conditions.
 
 For the full official evaluation, prepare a **separate plan** and pass it to all
 subsequent `check`, `run`, and `summary` commands:
@@ -186,21 +247,20 @@ python3 scripts/captain_baseline.py prepare --full --plan data/captain/official2
 
 ## Training and adding our changes
 
-Evaluating released weights verifies the inference pipeline; it does not reproduce
-training. The exact training entry points are the pinned upstream
-`sft/train/launch_sft.sh` with `sft/configs/captain-4b-sft.yaml`, and
-`rl/scripts/run_stream.sh rl/configs/captain-4b.json`. Follow their SFT/RL READMEs
-for released data, critic warm start, start bank, packing, loss normalization and
-environments. Do not substitute our PPO loop and call it an exact reproduction.
+Frozen Glimmer evaluation tests the interface change. The next training step
+uses CaPtain's in-harness trajectory format for **Glimmer SFT**, then adapts the
+physical-critic RL stage to Glimmer. The authors' entry points and configs under
+`sft/` and `rl/` are references, not drop-in Glimmer trainers: model loading,
+chat templates, vision freezing, supervised masks, sampling and reference-policy
+scoring must be adapted and checked.
 
 The released SFT run used 16 H100-80GB GPUs. RL provides 16- and 8-GPU layouts;
-there is no validated four-Ada recipe in the pinned release. Adapting to our
-hardware is a separate experiment and must be recorded as such.
+there is no validated four-Ada Glimmer recipe. A smaller hardware configuration,
+QLoRA, or context reduction is an explicit adaptation, not an exact reproduction.
+Our move-only Astra examples are not in-harness Python demonstrations.
 
-After the baseline runs, add one change per comparison: first an adapter that
-serves Glimmer in this same Python protocol, then in-harness SFT using this exact
-input/output format, then RL changes. Our existing move-only Astra examples are
-not the authors' in-harness Python trajectories. Keep policy, task states, budgets
-and perception fixed when comparing a reward, critic, or assistance change.
-Compare against the SFT/RL baselines as well as zero-shot; a zero-shot gain alone
-does not establish improvement over the paper's trained baseline.
+After establishing Glimmer's harness baseline, add one change per comparison:
+in-harness SFT, physical-critic RL, then our alternative rewards or assistance.
+Keep task states and settings fixed within each comparison. Report improvement
+over **Glimmer's own zero-shot and SFT baselines**. The paper's reported Qwen
+numbers are separate reference results, not Glimmer's baseline.
