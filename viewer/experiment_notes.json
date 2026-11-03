@@ -1,0 +1,16 @@
+{
+  "check_paper_env": "Environment/tool smoke test. Exercises valid and invalid moves; this is not policy training.",
+  "task0_ada": "Original full-task Glimmer PPO attempt on the Ada machine. Earlier check: two saved updates, then the process stopped.",
+  "task0_ada_resume": "Continuation of the original PPO attempt from update 2. Started from normal task initial states.",
+  "task0_curriculum_release15": "Reverse-curriculum attempt using demo states before the final release. The folder name alone does not establish how much training completed; inspect its configuration and records.",
+  "task0_curriculum_release1": "Very near final-release curriculum, with the first object already placed and the second held. This tests completion of the ending, not the full task from the beginning.",
+  "task0_curriculum_release2": "Final-release curriculum starting two recorded demo frames before release. Earlier displayed run: 7 successes out of 8 completed episodes.",
+  "compare_lead2_11_12": "Frozen comparison of release-2 checkpoints 11 and 12. Earlier report: each succeeded in 8/10 trials, with different failing starts; no clear winner from that small comparison.",
+  "task0_astra_sft_trial": "Small Astra imitation-learning trial. Earlier report: 64 training examples, one epoch; validation token NLL 0.5574 to 0.5349. This did not establish robot success.",
+  "task0_astra_sft_full": "Full prepared Astra task-0 imitation dataset. Earlier report: 611 training examples, one epoch; validation NLL 0.5709 to 0.4319.",
+  "task0_astra_sft_ppo_release2": "Despite its folder name, this PPO attempt was launched from normal initial states after the trial SFT checkpoint, without the release-state arguments. Check the saved configuration before interpreting it as a curriculum run.",
+  "task0_sft_full_eval_8_9": "Frozen full-task evaluation of the full SFT checkpoint on initial states 8 and 9, two samples each. Earlier report: 0/4 successes, final goal fraction 0. Final grasp flags do not prove the robot never grasped during a rollout.",
+  "task0_object_force_check": "Object-assistance physics check with an idle robot. Earlier check: helper gain 1 completed the task; gain 0 did not. This verifies helper forces, not Glimmer learning.",
+  "glimmer_python_server": "First Glimmer Python-tool server launch folder. Server startup or a saved configuration is not a completed robot evaluation.",
+  "glimmer_python_server_20261103_094423": "Dated frozen Glimmer Python-tool server launch. Activity and replies are read from this folder and the matching process. Robot episodes require a separate CaPtain evaluation run."
+}

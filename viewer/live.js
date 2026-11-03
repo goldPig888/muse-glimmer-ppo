@@ -92,7 +92,7 @@
     const optim=s.optimizer||{points:[],completed:0,total:0};
     byId('live-optimizer').textContent=optim.total?`Update ${optim.update??(s.phase==='optimizing'?s.update+1:s.update)} · backward ${optim.completed}/${optim.total}`:'Optimizer has not started';
     byId('live-scope').textContent='Selected episode: '+(s.selected||'waiting')+' · refreshes every 2 seconds';
-    const next=JSON.stringify([s.selected,s.turns,optim,s.metrics]);
+    const next=JSON.stringify([s.run_id,s.selected,s.turns,optim,s.metrics]);
     if(next===signature)return;signature=next;
     let cumulative=0,windowRewards=[],targets={x:null,y:null,z:null,gripper:null};
     const rows=s.turns.map(r=>{
