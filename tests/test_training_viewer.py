@@ -127,6 +127,7 @@ def test_default_catalog_includes_training_only(tmp_path):
     configs = {
         'ppo_run': ('config.json', {'args': {'updates': 2}}),
         'sft_run': ('config.json', {'mode': 'sft', 'args': {'epochs': 1}}),
+        'captain_rl': ('config.json', {'mode': 'captain_rl', 'args': {'rounds': 5}}),
         'server': ('server_config.json', {'model': 'Glimmer'}),
         'evaluation': ('evaluation_config.json', {}),
         'physics_check': ('results.json', [{'success': True}]),
@@ -135,8 +136,21 @@ def test_default_catalog_includes_training_only(tmp_path):
         folder = tmp_path / name
         folder.mkdir()
         (folder / filename).write_text(json.dumps(config))
-    assert {r['id'] for r in RunCatalog(tmp_path).discover()} == {'ppo_run', 'sft_run'}
+    assert {r['id'] for r in RunCatalog(tmp_path).discover()} == {'ppo_run', 'sft_run', 'captain_rl'}
     assert len(RunCatalog(tmp_path, training_only=False).discover()) == len(configs)
+
+
+def test_captain_rl_viewer_has_live_progress_and_round_metrics(tmp_path):
+    (tmp_path/'config.json').write_text('{"mode":"captain_rl","args":{"rounds":5,"group_size":4}}')
+    (tmp_path/'progress.json').write_text('{"phase":"generating","round":2,"sample":1,"generated_tokens":37,"token_cap":4096}')
+    (tmp_path/'metrics.jsonl').write_text('{"round":1,"success_rate":0.25,"critic_bce":0.7,"mean_return":0.1}\n')
+    reader=RunReader(tmp_path)
+    reader.gpu=lambda:[]
+    state=reader.snapshot()
+    assert state['kind']=='captain_rl'
+    assert state['cards'][0]['value']=='1 / 5'
+    assert state['cards'][1]['value']=='37 / 4096'
+    assert state['series'][0]['x']=='round'
 
 
 def test_evaluation_and_checkpoint_comparison_preserve_failures(tmp_path):

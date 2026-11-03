@@ -53,12 +53,17 @@ class FrozenGlimmer:
                 raise ValueError(f'context_length_exceeded: {n} prompt + {limit} output > {self.args.context_tokens}; no history removed')
             inputs = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
             print(f'[glimmer] generating: prompt={n} images={images} output_cap={limit}', flush=True)
+            token_hook = getattr(self, 'token_progress', None)
+            if token_hook:
+                token_hook(0, limit)
             from tqdm import tqdm
             from transformers import StoppingCriteria, StoppingCriteriaList
             with tqdm(total=limit, desc='Glimmer tokens', unit='tok', mininterval=1, dynamic_ncols=True) as bar:
                 class Progress(StoppingCriteria):
                     def __call__(self, input_ids, scores, **kwargs):
                         bar.update(input_ids.shape[1] - n - bar.n)
+                        if token_hook:
+                            token_hook(input_ids.shape[1] - n, limit)
                         return False
                 autocast = torch.autocast('cuda', dtype=torch.bfloat16) if self.device.type == 'cuda' else nullcontext()
                 with autocast:
@@ -72,6 +77,9 @@ class FrozenGlimmer:
             raw = self.processor.tokenizer.decode(tokens, skip_special_tokens=False)
             result = completion(raw, truncated=truncated, prompt_tokens=n,
                                 completion_tokens=len(tokens), model=self.args.served_name)
+            capture = getattr(self, 'capture_generation', None)
+            if capture:
+                capture(inputs, tokens, result)
             return result, raw
 
 
@@ -91,7 +99,7 @@ def make_server(backend, host, port, output):
                 self.send_json(200, dict(object='list', data=[dict(id=backend.args.served_name,
                                object='model', owned_by='local', root=backend.args.model)]))
             elif self.path == '/health':
-                self.send_json(200, dict(ready=True, policy='Glimmer', frozen=True))
+                self.send_json(200, dict(ready=True, policy='Glimmer', frozen=getattr(backend, 'frozen', True)))
             else:
                 self.send_json(404, dict(error=dict(message='not found')))
 

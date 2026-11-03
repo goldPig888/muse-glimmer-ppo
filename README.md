@@ -18,8 +18,8 @@ For the separate **CaPtain Python/perception pipeline baseline**, see
 the authors' pinned harness with Glimmer as the policy under test; `--env paper`
 mode above is the LLM-LIBERO move-only protocol, not CaPtain-Harness.
 
-The [experiment viewer](docs/experiment_viewer.md) can select all saved PPO, SFT,
-evaluation, assistance-check and Glimmer Python-server folders with one dropdown.
+The [experiment viewer](docs/experiment_viewer.md) shows training runs by default.
+For Glimmer RL through the Python harness, use the [CaPtain RL launcher](docs/captain_rl.md).
 
 Plan, formulas and parameters: the "Glimmer RL on LIBERO-90: Plan" doc.
 

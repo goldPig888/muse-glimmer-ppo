@@ -54,6 +54,8 @@ class RunReader:
     def kind(self):
         names = {p.name for p in self.root.iterdir() if p.is_file()}
         config = read_json(self.root / 'config.json')
+        if config.get('mode') == 'captain_rl':
+            return 'captain_rl'
         if 'server_config.json' in names:
             return 'python_server'
         if 'baseline_manifest.json' in names:
@@ -147,7 +149,28 @@ class RunReader:
             cards, series = [], []
             def card(label, value, caption=''):
                 cards.append(dict(label=label, value=value, caption=caption))
-            if kind == 'sft':
+            if kind == 'captain_rl':
+                completed = list(self.rows(self.root / 'episodes.jsonl'))
+                last = metrics[-1] if metrics else {}
+                card('RL rounds', f'{last.get("round", 0)} / {args.get("rounds", "—")}')
+                if progress.get('phase') == 'generating':
+                    card('Generated tokens', f'{progress.get("generated_tokens", 0)} / {progress.get("token_cap", "—")}',
+                         f'Round {progress.get("round", "—")} · rollout {progress.get("sample", "—")} / {args.get("group_size", 4)}')
+                elif progress.get('phase') == 'backward':
+                    card('Backward requests', f'{progress.get("backward", 0)} / {progress.get("backward_total", "—")}')
+                else:
+                    card('Current phase', progress.get('phase', 'initializing'))
+                wins = sum(bool(r.get('success')) for r in completed)
+                card('Training episode success', f'{100*wins/len(completed):.1f}%' if completed else '—', f'{wins} / {len(completed)} completed rollouts')
+                card('Critic BCE', last.get('critic_bce'), 'Separate privileged physical critic')
+                rows = metrics
+                series = [dict(key=key, label=label, x='round', rows=metrics) for key, label in
+                          (('success_rate','Training success per round'), ('mean_return','Mean return per round'),
+                           ('critic_bce','Physical critic BCE'), ('policy_loss','Actor objective'))]
+                summary = dict(latest_metrics=last, recent_episodes=completed[-12:],
+                               method=config.get('method'), adaptations=config.get('adaptations'),
+                               critic_initialization=config.get('critic_initialization'))
+            elif kind == 'sft':
                 last = metrics[-1] if metrics else {}
                 card('SFT epoch', f'{last.get("epoch", 0)} / {args.get("epochs", "—")}')
                 card('Validation NLL', last.get('validation_nll'), 'Lower is better; this is not robot success')
@@ -213,6 +236,7 @@ class RunReader:
             started = min((p.stat().st_mtime for p in evidence if p.exists()), default=None)
             descriptions = {
                 'sft': 'Supervised imitation of saved teacher actions. Loss measures token prediction; robot success requires evaluation.',
+                'captain_rl': 'Glimmer RL in CaPtain-Harness: grouped same-start rollouts, same-time physical critic and QLoRA actor updates. These are training rollouts, not held-out evaluation.',
                 'python_server': 'Frozen Glimmer serving the CaPtain Python tool. Server activity alone is not a robot experiment. Replies appear after generation finishes.',
                 'evaluation': 'Frozen policy evaluation. Results count completed episodes; no learning is performed here.',
                 'comparison': 'Frozen checkpoint comparison. Inspect per-checkpoint and per-start results in the saved summary.',
@@ -223,7 +247,7 @@ class RunReader:
                 'critic': 'Standalone critic diagnostic. This is not an actor-training result.',
                 'unknown': 'Folder found, but no supported experiment records are present. It may be an empty or incomplete attempt.',
             }
-            checkpoints = [p.relative_to(self.root).as_posix() for pattern in ('checkpoints/update_*', 'epoch_*') for p in sorted(self.root.glob(pattern)) if p.is_dir()]
+            checkpoints = [p.relative_to(self.root).as_posix() for pattern in ('checkpoints/update_*', 'checkpoints/round_*', 'epoch_*') for p in sorted(self.root.glob(pattern)) if p.is_dir() and not p.name.endswith('.tmp')]
             chosen = next((p for p in folders if p.relative_to(self.root).as_posix() == selected), folders[-1] if folders else None)
             frames = {}
             if chosen:
@@ -396,7 +420,7 @@ class ProcessReader:
     def match(self, root):
         if time.monotonic() - self.at > 5:
             self.at, self.entries = time.monotonic(), []
-            allowed = {'train_ppo.py', 'train_sft.py', 'eval_task.py', 'compare_demo_checkpoints.py',
+            allowed = {'train_ppo.py', 'train_sft.py', 'train_captain_rl.py', 'eval_task.py', 'compare_demo_checkpoints.py',
                        'serve_glimmer_python.py', 'check_glimmer_python.py', 'run_jobs.py',
                        'react_episode.py', 'check_object_assistance.py', 'train_physical_critic.py'}
             for proc in Path('/proc').iterdir():
@@ -456,7 +480,7 @@ class RunCatalog:
                 reader = self.readers.setdefault(key, RunReader(path))
                 reader.processes = self.processes
                 kind = reader.kind()
-                if self.training_only and kind not in ('ppo', 'sft'):
+                if self.training_only and kind not in ('ppo', 'sft', 'captain_rl'):
                     dirs[:] = []
                     continue
                 times = [(path / name).stat().st_mtime for name in files if name in markers]

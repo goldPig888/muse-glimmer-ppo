@@ -3,7 +3,7 @@
 The viewer reads existing files and observes owned processes. It does not load
 model weights, write to experiment folders, train, stop, or restart Glimmer.
 
-The dropdown shows **PPO and SFT training runs only by default**. Evaluations,
+The dropdown shows **PPO, SFT and CaPtain RL training runs only by default**. Evaluations,
 physics checks, smoke checks, and standalone Python servers are hidden. For
 occasional access to those saved records, use `--include-nontraining`.
 
@@ -89,6 +89,8 @@ curl -fsS http://127.0.0.1:8770/api/runs
 - **PPO:** existing reward/action curves, optimizer progress, episode picker,
   camera frames and per-decision inspection. Model checkpoints stay listed in
   their experiment, rather than appearing as separate runs.
+- **CaPtain RL:** live generation/backward progress, grouped rollout success,
+  actor objective, physical critic BCE, saved round checkpoints, and training config.
 - **SFT:** training and validation token NLL curves, epoch progress, example
   counts, metrics, config and saved epoch checkpoints. NLL is not robot accuracy.
 - **Evaluation and checkpoint comparisons:** completed results and failures,
