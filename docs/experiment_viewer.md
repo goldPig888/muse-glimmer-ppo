@@ -3,6 +3,10 @@
 The viewer reads existing files and observes owned processes. It does not load
 model weights, write to experiment folders, train, stop, or restart Glimmer.
 
+The dropdown shows **PPO and SFT training runs only by default**. Evaluations,
+physics checks, smoke checks, and standalone Python servers are hidden. For
+occasional access to those saved records, use `--include-nontraining`.
+
 ## What has been tried
 
 These notes summarize the folders and results previously pasted from cs94085.
@@ -38,8 +42,8 @@ find data -maxdepth 2 -type f \( -name '*.npz' -o -name 'manifest.json' -o -name
 
 `--list` reports the real folder paths, detected kind, matching process activity,
 and metadata-file modification times. It reads no model weights. Blank or
-unrecognized top-level attempt folders remain selectable and say that they have
-no supported records. New folders are discovered automatically every five seconds.
+unrecognized attempt folders are hidden by default; they remain accessible with
+`--include-nontraining`. New training folders are discovered every five seconds.
 
 ## Start the all-experiments viewer
 

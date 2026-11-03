@@ -89,7 +89,7 @@ def test_catalog_keeps_distinct_runs_and_rejects_paths_outside_root(tmp_path):
         (run / 'checkpoints/update_0001/config.json').write_text('{}')
     (tmp_path / 'empty_attempt').mkdir()
     (tmp_path / 'external').symlink_to('/tmp', target_is_directory=True)
-    catalog = RunCatalog(tmp_path)
+    catalog = RunCatalog(tmp_path, training_only=False)
     assert {r['id'] for r in catalog.discover()} == {'first', 'second', 'empty_attempt'}
     assert catalog.selected('first')[0].root != catalog.selected('second')[0].root
     with pytest.raises(FileNotFoundError):
@@ -121,6 +121,22 @@ def test_sft_and_server_show_their_own_metrics_not_ppo_rewards(tmp_path):
     assert state['cards'][1]['value'] == 1
     assert state['series'][0]['rows'][0]['completion_tokens'] == 14
     assert not state['metrics']
+
+
+def test_default_catalog_includes_training_only(tmp_path):
+    configs = {
+        'ppo_run': ('config.json', {'args': {'updates': 2}}),
+        'sft_run': ('config.json', {'mode': 'sft', 'args': {'epochs': 1}}),
+        'server': ('server_config.json', {'model': 'Glimmer'}),
+        'evaluation': ('evaluation_config.json', {}),
+        'physics_check': ('results.json', [{'success': True}]),
+    }
+    for name, (filename, config) in configs.items():
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / filename).write_text(json.dumps(config))
+    assert {r['id'] for r in RunCatalog(tmp_path).discover()} == {'ppo_run', 'sft_run'}
+    assert len(RunCatalog(tmp_path, training_only=False).discover()) == len(configs)
 
 
 def test_evaluation_and_checkpoint_comparison_preserve_failures(tmp_path):

@@ -426,9 +426,10 @@ class ProcessReader:
 
 
 class RunCatalog:
-    def __init__(self, root, initial=None):
+    def __init__(self, root, initial=None, training_only=True):
         self.root = Path(root).resolve()
         self.initial = Path(initial).resolve() if initial else None
+        self.training_only = training_only
         self.readers = {}
         self.processes = ProcessReader()
         self.lock = threading.Lock()
@@ -455,6 +456,9 @@ class RunCatalog:
                 reader = self.readers.setdefault(key, RunReader(path))
                 reader.processes = self.processes
                 kind = reader.kind()
+                if self.training_only and kind not in ('ppo', 'sft'):
+                    dirs[:] = []
+                    continue
                 times = [(path / name).stat().st_mtime for name in files if name in markers]
                 entries.append(dict(id=key, name=key, path=str(path), kind=kind,
                                     running=bool(reader.process()), last_activity=max(times, default=path.stat().st_mtime)))
@@ -541,6 +545,7 @@ def main():
     parser.add_argument('--run', type=Path, help='initial experiment (optional with --runs-root)')
     parser.add_argument('--runs-root', type=Path, help='discover experiment folders under this directory')
     parser.add_argument('--list', action='store_true', help='print discovered experiments as JSON and exit')
+    parser.add_argument('--include-nontraining', action='store_true', help='also show evaluations and checks (hidden by default)')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8766)
     args = parser.parse_args()
@@ -551,7 +556,7 @@ def main():
         parser.error('runs root does not exist')
     if args.run and not args.run.resolve().is_relative_to(root.resolve()):
         parser.error('--run must be inside --runs-root')
-    catalog = RunCatalog(root, args.run)
+    catalog = RunCatalog(root, args.run, training_only=not args.include_nontraining)
     if args.list:
         print(json.dumps(dict(root=str(root.resolve()), experiments=catalog.discover()), indent=2))
         return
